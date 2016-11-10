@@ -11,7 +11,7 @@
 -export([init/1, init/2,
 	 ray/2, ray/4, ray_trace/2,
 	 intersect/2,
-	 hit_triangle/5, tri_intersect/4]).
+	 hit_triangle/5, tri_intersect/6]).
 
 -include("e3d.hrl").
 
@@ -352,7 +352,7 @@ intersect_2(#{mesh:=Mesh1, index:=I1, vs:=F1},
     T2 = get_tri(Mesh2, F2, Vs2),
     %% io:format("~p ~p:~p:~p~n~p ~p:~p:~p",
     %% 	      [Mesh1, I1  div 2, I1, T1, Mesh2, I2 div 2, I2, T2]),
-    case tri_intersect(T1, T2, {Mesh1,I1}, {Mesh2,I2}) of
+    case tri_intersect(T1, T2, F1, F2, {Mesh1,I1}, {Mesh2,I2}) of
 	false ->
 	    %% io:format(" => Miss~n~n"),
 	    Acc;
@@ -362,7 +362,7 @@ intersect_2(#{mesh:=Mesh1, index:=I1, vs:=F1},
     end.
 
 %% Möller (realtimerendering, page 590 in 2nd edition)
-tri_intersect({V0,V1,V2}, {U0,U1,U2}, F1, F2) ->
+tri_intersect({V0,V1,V2}, {U0,U1,U2}, {IdV0,IdV1,IdV2}, {IdU0,IdU1,IdU2}, F1, F2) ->
     E1 = e3d_vec:sub(V1, V0),
     E2 = e3d_vec:sub(V2, V0),
     N1 = e3d_vec:cross(E1,E2),
@@ -399,7 +399,8 @@ tri_intersect({V0,V1,V2}, {U0,U1,U2}, F1, F2) ->
 		    D = e3d_vec:cross(N1,N2),
 		    Index = largest_dir(D),
 		    %% Compute interval for triangle 1
-		    case tri_intvals(V0,V1,V2, Index, Dv0, Dv1, Dv2, Dv0Dv1, Dv0Dv2) of
+		    case tri_intvals({V0,IdV0},{V1,IdV1},{V2,IdV2},
+                                     Index, Dv0, Dv1, Dv2, Dv0Dv1, Dv0Dv2) of
 			true ->
 			    %% case coplanar_tri_tri(N1,V0,V1,V2,U0,U1,U2) of
 			    %% 	true -> {A1,A2};
@@ -408,7 +409,8 @@ tri_intersect({V0,V1,V2}, {U0,U1,U2}, F1, F2) ->
 			    %% Coplanar we don't care about those faces
 			    coplanar;
 			{ISect1,A1,A2} ->
-			    {ISect2,B1,B2} = tri_intvals(U0,U1,U2, Index, Du0, Du1, Du2, Du0Du1, Du0Du2),
+			    {ISect2,B1,B2} = tri_intvals({U0, IdU0}, {U1,IdU1}, {U2,IdU2},
+                                                         Index, Du0, Du1, Du2, Du0Du1, Du0Du2),
 			    io:format("~p  ~p~n",[sort2(ISect1),sort2(ISect2)]),
 			    io:format("A1:~w~nA2:~w~nB1:~w~nB2:~w~n", [(A1),(A2),(B1),(B2)]),
 			    PP = pick_points(sort2(ISect1), sort2(ISect2), A1, A2, B1, B2, F1, F2),
@@ -440,7 +442,7 @@ tri_intvals(_V1, _V2, _V3, _Index, _D0, _D1, _D2, _DOD1, _DOD2) ->
     %% triangles are coplanar
     true.
 
-isect2(V0, V1, V2, Index, D0, D1, D2) ->
+isect2({V0,IdV0}, {V1,IdV1}, {V2,IdV2}, Index, D0, D1, D2) ->
     Tmp0 = D0/(D0-D1),
     VV0 = element(Index, V0),
     VV1 = element(Index, V1),
@@ -454,7 +456,7 @@ isect2(V0, V1, V2, Index, D0, D1, D2) ->
     Diff10 = e3d_vec:sub(V2,V0),
     Diff11 = e3d_vec:mul(Diff10, Tmp1),
     P1 = e3d_vec:add(V0, Diff11),
-    {{Isect0, Isect1}, P0, P1}.
+    {{Isect0, Isect1}, {P0,IdV0,IdV1}, {P1,IdV0,IdV2}}.
 
 pick_points({IS10,IS11,_}, {IS20,IS21,_}, _A1, _A2, _B1, _B2, _F1, _F2)
   when (IS11 < IS20) orelse (IS21 < IS10) ->
