@@ -17,6 +17,7 @@
 -include("wings.hrl").
 
 -compile(export_all).
+-define(EPSILON, 1.0e-15).
 
 add(St0) ->
     MapBvh = wings_sel:fold(fun make_bvh/3, [], St0),
@@ -53,16 +54,9 @@ find_intersect(_Head, []) ->
     false.
 
 merge(EdgeInfo, #{id:=Id1,fs:=Fs1}=I1, #{id:=Id2,fs:=Fs2}=I2) ->
-    ReEI = [remap(Edge, I1, I2) || Edge <- EdgeInfo],
-    %%?dbg("EI: ~p~n", [ReEI]),
-    %% KD3 = make_kd3(ReEI),
-    %% ?dbg("~p~n", [KD3]),
-    %% VLoops0 = build_vtx_loops(KD3, []),
-    %% ?dbg("~p~n", [[pick(E) || E <- hd(VLoops0)]]),
-    %% _VLoops1 = [loop_we(Loop, Id1) || Loop <- VLoops0],
-    %% _VLoops2 = [loop_we(Loop, Id2) || Loop <- VLoops0],
-    %% %% ?dbg("Loop ~p: ~p~n", [Id1, _VLoops1]),
-    %% %% ?dbg("Loop ~p: ~p~n", [Id2, _VLoops2]),
+    ReEI0 = [remap(Edge, I1, I2) || Edge <- EdgeInfo],
+    {_Vmap, ReEI} = make_vmap(ReEI0, e3d_kd3:empty(), 0, []),
+    io:format("~p~n",[_Vmap]),
     Tab = make_lookup_table(ReEI),
     Loops = build_vtx_loops(Tab, []),
     [?dbg("~p~n", [Loop]) || Loop <- Loops],
@@ -81,12 +75,23 @@ make_bvh(_, #we{id=Id, fs=Fs0}=We0, Bvhs) ->
     Bvh = e3d_bvh:init([{array:size(Ts), Get}]),
     [#{id=>Id,map=>Ts,bvh=>Bvh,fs=>[],we=>We0}|Bvhs].
 
-make_kd3(Edges) ->
-    Ps = lists:foldl(fun(#{p1:=P1,p2:=P2}=EI, Acc) ->
-			     [{P1, EI}, {P2, EI}|Acc]
-		     end, [], Edges),
-    
-    e3d_kd3:from_list(Ps).
+
+make_vmap([#{p1:=P10, p2:=P20}=E|R], T0, N0, Acc) ->
+    {P1, N1, T1} = vmap(P10, N0, T0),
+    {P2, N2, T2} = vmap(P20, N1, T1),
+    make_vmap(R, T2, N2, [E#{p1:=P1,p2:=P2}|Acc]);
+make_vmap([], T, _, Acc) -> {e3d_kd3:to_list(T), Acc}.
+
+vmap({Where, Pos}, N, Tree) ->
+    case e3d_kd3:is_empty(Tree) of
+        true -> {{Where, N}, N+1, e3d_kd3:enter(Pos, N, Tree)};
+        false ->
+            {P1, V1} = e3d_kd3:nearest(Pos, Tree),
+            case e3d_vec:dist_sqr(Pos, P1) < ?EPSILON of
+                true  -> {{Where, V1}, N, Tree};
+                false -> {{Where, N}, N+1, e3d_kd3:enter(Pos, N, Tree)}
+            end
+    end.
 
 min_length(#{p1:={P1,_,_},p2:={P2,_,_}}=_Edge) ->
     Dist2 = e3d_vec:dist_sqr(P1,P2),
@@ -103,35 +108,64 @@ loop_we_1({Point, #{mf1:=MF1, other:={_, F2}}}, Id) ->
     end.
 
 make_lookup_table(Edges) ->
-    Ps = lists:foldl(fun(#{p1:={P1,_},p2:={P2,_}}=EI, Acc) ->
-			     [{P1, EI}, {P2, EI}|Acc]
-		     end, [], Edges),
-    io:format("~p~n",[lists:sort(Ps)]), % lists:sort([Path || {Path,_} <- Ps])]),
-    gb_trees:from_orddict(lists:sort(Ps)).
+    G = digraph:new(),
+    %% Ps = lists:foldl(fun(#{p1:={P1,_},p2:={P2,_}}=EI, Acc) ->
+    %%     		     [{P1, EI}, {P2, EI}|Acc]
+    %%     	     end, [], Edges),
+    %% io:format("~p~n",[lists:sort(Ps)]), % lists:sort([Path || {Path,_} <- Ps])]),
+    %% gb_trees:from_orddict(lists:sort(Ps)).
+    Add = fun(#{p1:={_,P1},p2:={_,P2}}=EI) ->
+                  digraph:add_vertex(G, P1),
+                  digraph:add_vertex(G, P2),
+                  digraph:add_edge(G, P1, P2, EI)
+                      % digraph:add_edge(G, P2, P1, EI)
+          end,
+    _ = [Add(EI) || EI <- Edges],
+    G.
 
-build_vtx_loops(Tab0, Acc) ->
-    case gb_trees:is_empty(Tab0) orelse gb_trees:take_smallest(Tab0) of
-        true -> Acc;
-        {Start, Edge0, Tab1} ->
-            {#{p2:={Next,_}}=Edge, Tab2} = delete_other(Start, Edge0, Tab1),
-            {Loop, Tab} = build_vtx_loop(Next, Start, Tab2, [Edge]),
-            build_vtx_loops(Tab, [Loop|Acc])
-    end.
+build_vtx_loops(G, _Acc) ->
+    Comps = digraph_utils:components(G),
+    ?dbg("Cs: ~p: ~p~n",[G, Comps]),
+    [build_vtx_loop(C, G) || C <- Comps].
 
-build_vtx_loop(Next, Next, Tab, Acc) ->
-    {lists:reverse(Acc), Tab};
-build_vtx_loop(This, Start, Tab0, Acc) ->
-    Edge0 = gb_trees:get(This, Tab0),
-    {#{p2:={Next,_}}=Edge, Tab} = delete_other(This, Edge0, gb_trees:delete(This, Tab0)),
-    build_vtx_loop(Next, Start, Tab, [Edge|Acc]).
 
-delete_other(Start, #{p1:={Start,_}, p2:={End, _}} = Edge, Tab0) ->
-    Tab = gb_trees:delete(End, Tab0),
-    {Edge, Tab};
-delete_other(Start, #{p1:={End,_}, p2:={Start, _}} = Edge, Tab0) ->
-    Tab = gb_trees:delete(End, Tab0),
-    {Edge, Tab}.
+%% We need to build the cycle our selfves since the edges may not be directed
+%% in the correct direction. Also the V is new Vs on edges and there maybe
+%% several new V on the same wings edge.
+build_vtx_loop([V|_Vs], G) ->
+    ?dbg("v: ~p~n  ", [V]),
+    [io:format("~p ", [digraph:edge(G, E)]) || E <- digraph:edges(G,V)],
+    io:nl(),
+    [Edge|_] = case digraph:out_edges(G,V) of
+                 [] -> digraph:in_edges(G,V);
+                 Out -> Out
+             end,
+    case digraph:edge(G, Edge) of
+        {_, _, _, #{p1:={_,V}, p2:=Next}=Ei} -> Next;
+        {_, _, _, #{p2:={_,V}, p1:=Next}=Ei} -> Next
+    end,
+    digraph:del_edge(G, Edge),
+    build_vtx_loop(Next, V, G, [{V,Ei}]).
 
+build_vtx_loop(Start, Start, _G, Acc) ->
+    Acc;
+build_vtx_loop(V0, Start, G, Acc) ->
+    ?dbg("~p ~n",[V0]),
+    Es = [digraph:edge(G, E) || E <- digraph:edges(G, V0)],
+    {Edge, Next, Ei} = pick_edge(Es, V0, undefined),
+    digraph:del_edge(G, Edge),
+    build_vtx_loop(Next, Start, G, [{V0,Ei}|Acc]).
+
+pick_edge([{E,V,V,Ei}|_], V, _Best) ->
+    {E, V, Ei}; %% Self cyclic pick first
+pick_edge([{E,V,N,Ei}|R], V, _Best) ->
+    pick_edge(R, V, {E,N,Ei});
+pick_edge([], _, Best) -> Best.
+
+
+    %build_vtx_loop(Vs, G, Acc);
+%% build_vtx_loop([], _G, Acc) ->
+%%     Acc.
 
 
 %% build_vtx_loops(KD30, Acc) ->
@@ -196,8 +230,8 @@ remap(#{mf1:=MF10,mf2:=MF20,p1:={Pos1,E11,E12}, p2:= {Pos2, E21, E22}, other:=Ot
     MF1 = remap_1(MF10, Id1, M1, Id2, M2),
     MF2 = remap_1(MF20, Id1, M1, Id2, M2),
     Oth = remap_1(Other, Id1, M1, Id2, M2),
-    EId1 = {MF1, order(E11,E12)},
-    EId2 = {MF2, order(E21,E22)},
+    EId1 = {element(1,MF1), order(E11,E12)},
+    EId2 = {element(1,MF2), order(E21,E22)},
     case Id1 < Id2 of
         true  -> #{mf1=>MF1, mf2=>MF2, p1=>{EId1, Pos1}, p2=>{EId2, Pos2}, other=>Oth};
         false -> #{mf1=>MF2, mf2=>MF1, p1=>{EId2, Pos2}, p2=>{EId1, Pos1}, other=>Oth}

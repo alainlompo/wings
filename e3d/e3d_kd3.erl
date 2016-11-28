@@ -29,7 +29,7 @@
 
 -export([from_list/1, to_list/1,
  	 empty/0,is_empty/1,is_kd3/1,size/1,
-%% 	 enter/3,
+ 	 enter/3,
 	 delete/2, delete_object/2,
 	 nearest/2, take_nearest/2,
 	 fold/5
@@ -148,6 +148,12 @@ from_list(List = [_|_], BB) ->
     end;
 from_list(Data, _) -> Data.
 
+%%% @spec (object(), e3d_kd3()) -> e3d_kd3()
+%%% @doc  Add node to the tree.
+enter(Point, Id, #e3d_kd3{tree=Tree0}) ->
+    Tree = add_1({Point, Id}, Tree0),
+    #e3d_kd3{tree=Tree}.
+
 %%% @spec (e3d_kd3()) -> [object()]
 %%% @doc  Return all nodes in the tree.
 to_list(#e3d_kd3{tree=Tree}) ->
@@ -237,4 +243,25 @@ split([], _, _, L,LB,R,RB) ->
 
 closest([Dist1|_]=Node1, [Dist2|_]) when Dist1 < Dist2 -> Node1;
 closest(_, Node) -> Node.
+
+add_1(P0, []) -> [P0];
+add_1({P0,_}=Obj, [{P1,_}|_]=T0) ->
+    BB = e3d_bv:box(P0, P1),
+    case e3d_bv:max_extent(BB) of
+	undefined -> %% All positions are exactly the same
+	    [P0|T0];
+	Axis ->
+	    Split = element(Axis, e3d_bv:center(BB)),
+	    {Left,LBB,Right,RBB} = split([Obj|T0], Axis, Split),
+	    ?NODE(Split, Axis, %(Len bsl 2) bor Axis,
+		  from_list(Left,  LBB),
+		  from_list(Right, RBB))
+    end;
+add_1({P0,_}=Obj, {SplitPos, Axis, L, R}) ->
+    PointPos = element(Axis, P0),
+    case SplitPos < PointPos of
+	true  -> {SplitPos, Axis, L, add_1(Obj, R)};
+	false -> {SplitPos, Axis, add_1(Obj, L), R}
+    end.
+
 
