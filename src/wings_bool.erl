@@ -27,7 +27,7 @@ add(St0) ->
     Sel1 = sofs:relation_to_family(Sel0),
     Sel2 = sofs:to_external(Sel1),
     Sel = [{Id,gb_sets:from_list(L)} || {Id,L} <- Sel2],
-    ?dbg("~p~n", [Sel2]),
+    % ?dbg("~p~n", [Sel2]),
     wings_sel:set(face, Sel, St0).
 
 find_intersects([Head|Tail], [_|_] = Alts, Acc) ->
@@ -38,7 +38,7 @@ find_intersects([Head|Tail], [_|_] = Alts, Acc) ->
 	    %% ?dbg("~p,~p => ~p~n",
 	    %% 	      [maps:get(id, Head), maps:get(id, H1), maps:get(fs,Merge)]),
 	    NewTail = [Merge|remove(H1, Head, Tail)],
-	    NewAlts = [Merge|remove(H1, Head, Tail)],
+	    NewAlts = [Merge|remove(H1, Head, Alts)],
 	    find_intersects(NewTail, NewAlts, [Merge|remove(Head,Acc)])
     end;
 find_intersects(_, _, Acc) -> lists:reverse(Acc).
@@ -60,6 +60,10 @@ merge(EdgeInfo, #{id:=Id1,fs:=Fs1}=I1, #{id:=Id2,fs:=Fs2}=I2) ->
     Tab = make_lookup_table(ReEI),
     Loops = build_vtx_loops(Tab, []),
     [?dbg("~p~n", [Loop]) || Loop <- Loops],
+    L1 = [split_loop(Loop, Id1) || Loop <- Loops],
+    L2 = [split_loop(Loop, Id2) || Loop <- Loops],
+    [?dbg("~p~n", [Loop]) || Loop <- hd(L1)],
+    [?dbg("~p~n", [Loop]) || Loop <- hd(L2)],
     MFs = lists:flatten([[MF1,MF2] || #{mf1:=MF1,other:=MF2} <- ReEI]),
     I1#{id:=min(Id1,Id2),fs:=Fs1++Fs2++MFs}.
 
@@ -74,7 +78,6 @@ make_bvh(_, #we{id=Id, fs=Fs0}=We0, Bvhs) ->
 	  end,
     Bvh = e3d_bvh:init([{array:size(Ts), Get}]),
     [#{id=>Id,map=>Ts,bvh=>Bvh,fs=>[],we=>We0}|Bvhs].
-
 
 make_vmap([#{p1:=P10, p2:=P20}=E|R], T0, N0, Acc) ->
     {P1, N1, T1} = vmap(P10, N0, T0),
@@ -109,23 +112,17 @@ loop_we_1({Point, #{mf1:=MF1, other:={_, F2}}}, Id) ->
 
 make_lookup_table(Edges) ->
     G = digraph:new(),
-    %% Ps = lists:foldl(fun(#{p1:={P1,_},p2:={P2,_}}=EI, Acc) ->
-    %%     		     [{P1, EI}, {P2, EI}|Acc]
-    %%     	     end, [], Edges),
-    %% io:format("~p~n",[lists:sort(Ps)]), % lists:sort([Path || {Path,_} <- Ps])]),
-    %% gb_trees:from_orddict(lists:sort(Ps)).
     Add = fun(#{p1:={_,P1},p2:={_,P2}}=EI) ->
                   digraph:add_vertex(G, P1),
                   digraph:add_vertex(G, P2),
                   digraph:add_edge(G, P1, P2, EI)
-                      % digraph:add_edge(G, P2, P1, EI)
           end,
     _ = [Add(EI) || EI <- Edges],
     G.
 
 build_vtx_loops(G, _Acc) ->
     Comps = digraph_utils:components(G),
-    ?dbg("Cs: ~p: ~p~n",[G, Comps]),
+    %?dbg("Cs: ~p: ~p~n",[G, Comps]),
     [build_vtx_loop(C, G) || C <- Comps].
 
 
@@ -133,90 +130,57 @@ build_vtx_loops(G, _Acc) ->
 %% in the correct direction. Also the V is new Vs on edges and there maybe
 %% several new V on the same wings edge.
 build_vtx_loop([V|_Vs], G) ->
-    ?dbg("v: ~p~n  ", [V]),
-    [io:format("~p ", [digraph:edge(G, E)]) || E <- digraph:edges(G,V)],
-    io:nl(),
+    %% ?dbg("v: ~p~n  ", [V]),
+    %% [io:format("~p ", [digraph:edge(G, E)]) || E <- digraph:edges(G,V)],
+    %% io:nl(),
     [Edge|_] = case digraph:out_edges(G,V) of
                  [] -> digraph:in_edges(G,V);
                  Out -> Out
              end,
     case digraph:edge(G, Edge) of
-        {_, _, _, #{p1:={_,V}, p2:=Next}=Ei} -> Next;
-        {_, _, _, #{p2:={_,V}, p1:=Next}=Ei} -> Next
+        {_, _, _, #{p1:={_,V}, p2:={_,Next}}=Ei} -> Next;
+        {_, _, _, #{p2:={_,V}, p1:={_,Next}}=Ei} -> Next
     end,
     digraph:del_edge(G, Edge),
-    build_vtx_loop(Next, V, G, [{V,Ei}]).
+    build_vtx_loop(Next, V, G, [Ei,V]).
 
 build_vtx_loop(Start, Start, _G, Acc) ->
     Acc;
 build_vtx_loop(V0, Start, G, Acc) ->
-    ?dbg("~p ~n",[V0]),
     Es = [digraph:edge(G, E) || E <- digraph:edges(G, V0)],
+    %% ?dbg("~p => ~p ~n",[V0, Es]),
     {Edge, Next, Ei} = pick_edge(Es, V0, undefined),
     digraph:del_edge(G, Edge),
-    build_vtx_loop(Next, Start, G, [{V0,Ei}|Acc]).
+    build_vtx_loop(Next, Start, G, [Ei,V0|Acc]).
 
 pick_edge([{E,V,V,Ei}|_], V, _Best) ->
     {E, V, Ei}; %% Self cyclic pick first
 pick_edge([{E,V,N,Ei}|R], V, _Best) ->
     pick_edge(R, V, {E,N,Ei});
+pick_edge([{E,N,V,Ei}|R], V, _Best) ->
+    pick_edge(R, V, {E,N,Ei});
 pick_edge([], _, Best) -> Best.
 
+split_loop([Last|Loop], Id1) ->
+    split_loop(Loop, Last, Id1, []).
 
-    %build_vtx_loop(Vs, G, Acc);
-%% build_vtx_loop([], _G, Acc) ->
-%%     Acc.
+split_loop([V1,E|Loop], Last, Id, Acc) when is_integer(V1) ->
+    Vertex = vertex_info(E, V1, Id),
+    split_loop(Loop, Last, Id, [Vertex|Acc]);
+split_loop([V1], E, Id, Acc) ->
+    Vertex = vertex_info(E, V1, Id),
+    lists:reverse([Vertex|Acc]).
 
-
-%% build_vtx_loops(KD30, Acc) ->
-%%     case e3d_kd3:take_nearest({1.0e23,1.0e23,1.0e23}, KD30) of
-%% 	undefined -> Acc;
-%% 	{{_,Edge}=First, KD31} ->
-%% 	    {P1,{Pos,_}=P2} = pick(First),
-%% 	    KD32 = e3d_kd3:delete_object({Pos,Edge}, KD31),
-%% 	    {Loop, KD33} = build_vtx_loop(P2, P1, KD32, [First]),
-%% 	    build_vtx_loops(KD33, [Loop|Acc])
-%%     end.
-
-%% build_vtx_loop({Pos,MF1}=Search, Start, KD30, Acc) ->
-%%     ?dbg("~p~n",[Search]),
-%%     case e3d_kd3:take_nearest(Pos, KD30) of
-%% 	{{_,Edge}=Next,KD31} ->
-%% 	    case pick(Next) of
-%% 		{{_,MF1}, {Pos2,_} = P2} ->
-%% 		    KD32 = e3d_kd3:delete_object({Pos2,Edge}, KD31),
-%% 		    build_vtx_loop(P2, Start, KD32, [Next|Acc]);
-%% 		{_, {Pos2,_} = P2} ->
-%% 		    %% Wrong face, see if there is better alternative
-%% 		    KD32 = e3d_kd3:delete_object({Pos2,Edge}, KD31),
-%% 		    case e3d_kd3:take_nearest(Pos, KD32) of
-%% 			{{_,Edge2}=Next2,_} ->
-%% 			    case pick(Next2) of
-%% 				{{Pos11,MF1}, {Pos21,_} = P21} ->
-%% 				    KD33 = e3d_kd3:delete_object({Pos11,Edge2}, KD30),
-%% 				    KD34 = e3d_kd3:delete_object({Pos21,Edge2}, KD33),
-%% 				    build_vtx_loop(P21, Start, KD34, [Next2|Acc]);
-%% 				_ ->
-%% 				    KD32 = e3d_kd3:delete_object({Pos2,Edge}, KD31),
-%% 				    build_vtx_loop(P2, Start, KD32, [Next|Acc])
-%% 			    end;
-%% 			_ ->
-%% 			    KD32 = e3d_kd3:delete_object({Pos2,Edge}, KD31),
-%% 			    build_vtx_loop(P2, Start, KD32, [Next|Acc])
-%% 		    end
-%% 	    end;
-%% 	undefined ->
-%% 	    {Acc, KD30}
-%%     end.
-
-%% pick({P1, #{p1:=P1,mf1:=MF1,p2:=P2,mf2:=MF2}}) -> {{P1,MF1},{P2,MF2}};
-%% pick({P2, #{p1:=P1,mf1:=MF1,p2:=P2,mf2:=MF2}}) -> {{P2,MF2},{P1,MF1}}.
-
-%% pick({_, #{p1:=P1,p2:=P2}}, Search) ->
-%%     case e3d_vec:dist_sqr(P1, Search) < e3d_vec:dist_sqr(P2, Search) of
-%% 	true  -> {P1,P2};
-%% 	false -> {P2,P1}
-%%     end.
+vertex_info(#{mf1:={O1,F1}, mf2:={O2,F2}, other:={O3,F3}, p1:={{_, Edge},V0}}, V0, Id) ->
+    if O1 =:= Id -> {split_edge, O1, F1, Edge, V0};
+       O2 =:= Id -> {split_face, O2, F2, V0};
+       O3 =:= Id -> {split_face, O3, F3, V0}
+    end;
+vertex_info(#{mf2:={O1,F1}, mf1:={O2,F2}, other:={O3,F3}, p2:={{_, Edge},V0}}, V0, Id) ->
+    if O1 =:= Id -> {split_edge, O1, F1, Edge, V0};
+       O2 =:= Id -> {split_face, O2, F2, V0};
+       O3 =:= Id -> {split_face, O3, F3, V0}
+    end.
 
 remove(#{id:=Id}, List) ->
     Map = mapsfind(Id, id, List),
