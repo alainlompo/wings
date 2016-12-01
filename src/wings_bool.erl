@@ -19,7 +19,7 @@
 -compile(export_all).
 -define(EPSILON, 1.0e-15).
 
-add(St0) ->
+add(#st{shapes=Sh0}=St0) ->
     MapBvh = wings_sel:fold(fun make_bvh/3, [], St0),
     IntScts = find_intersects(MapBvh, MapBvh, []),
     MFs = lists:append([MFL || #{fs:=MFL} <- IntScts]),
@@ -28,7 +28,10 @@ add(St0) ->
     Sel2 = sofs:to_external(Sel1),
     Sel = [{Id,gb_sets:from_list(L)} || {Id,L} <- Sel2],
     % ?dbg("~p~n", [Sel2]),
-    wings_sel:set(face, Sel, St0).
+    Sh = lists:foldl(fun(#{we:=We=#we{id=Id}}, Sh) ->
+                             gb_trees:update(Id, We, Sh)
+                     end, Sh0, IntScts),
+    wings_sel:set(face, Sel, St0#st{shapes=Sh}).
 
 find_intersects([Head|Tail], [_|_] = Alts, Acc) ->
     case find_intersect(Head, Alts) of
@@ -53,82 +56,61 @@ find_intersect(#{bvh:=B1}=Head, [#{bvh:=B2}=H1|Rest]) ->
 find_intersect(_Head, []) ->
     false.
 
-merge(EdgeInfo, #{id:=Id1,fs:=Fs1}=I1, #{id:=Id2,fs:=Fs2}=I2) ->
+merge(EdgeInfo, #{id:=Id1,fs:=Fs1,we:=We1}=I1, #{id:=Id2,fs:=Fs2,we:=_We2}=I2) ->
     ReEI0 = [remap(Edge, I1, I2) || Edge <- EdgeInfo],
-    {_Vmap, ReEI} = make_vmap(ReEI0, e3d_kd3:empty(), 0, []),
-    io:format("~p~n",[_Vmap]),
+    {Vmap, ReEI} = make_vmap(ReEI0, e3d_kd3:empty(), 0, []),
+    io:format("~p~n",[Vmap]),
     Tab = make_lookup_table(ReEI),
     Loops = build_vtx_loops(Tab, []),
-    [?dbg("~p~n", [Loop]) || Loop <- Loops],
+    % [?dbg("~p~n", [Loop]) || Loop <- Loops],
     L1 = [split_loop(Loop, Id1) || Loop <- Loops],
-    L2 = [split_loop(Loop, Id2) || Loop <- Loops],
-    [?dbg("~p~n", [Loop]) || Loop <- hd(L1)],
-    [?dbg("~p~n", [Loop]) || Loop <- hd(L2)],
+    _L2 = [split_loop(Loop, Id2) || Loop <- Loops],
+    %[?dbg("~p~n", [Loop]) || Loop <- hd(L1)],
+    %[?dbg("~p~n", [Loop]) || Loop <- hd(L2)],
+    We1N = make_verts(L1, Vmap, We1),
     MFs = lists:flatten([[MF1,MF2] || #{mf1:=MF1,other:=MF2} <- ReEI]),
-    I1#{id:=min(Id1,Id2),fs:=Fs1++Fs2++MFs}.
+    I1#{id:=min(Id1,Id2),fs:=Fs1++Fs2++MFs, we:=We1N}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+make_verts(Loops, Vmap, We0) ->
+    All = lists:append(Loops),
+    {SE,SF} = lists:partition(fun(Op) -> element(1, Op) =:= split_edge end, All),
+    We1 = cut_edges(SE, Vmap, We0),
+    We = cut_faces(SF, Vmap, We1),
+    We.
 
-make_bvh(_, #we{id=Id, fs=Fs0}=We0, Bvhs) ->
-    Fs = gb_trees:keys(Fs0),
-    {Vtab,Ts} = triangles(Fs, We0),
-    Get = fun({verts, Face}) -> element(1, array:get(Face, Ts));
-	     (verts) -> Vtab;
-	     (meshId) -> Id
-	  end,
-    Bvh = e3d_bvh:init([{array:size(Ts), Get}]),
-    [#{id=>Id,map=>Ts,bvh=>Bvh,fs=>[],we=>We0}|Bvhs].
+cut_edges(SE, Vmap, We0) ->
+    ?dbg("~p ~n", [SE]),
+    WiEs = [{wings_vertex:edge_through(A,B,F,We0),Vn} || {split_edge, _Id, F, {A,B}, Vn} <- SE],
+    ECuts = sofs:to_external(sofs:relation_to_family(sofs:relation(WiEs, [{edge,vn}]))),
+    lists:foldl(fun(ECut,We) -> cut_edge(ECut, Vmap, We) end, We0, ECuts).
 
-make_vmap([#{p1:=P10, p2:=P20}=E|R], T0, N0, Acc) ->
-    {P1, N1, T1} = vmap(P10, N0, T0),
-    {P2, N2, T2} = vmap(P20, N1, T1),
-    make_vmap(R, T2, N2, [E#{p1:=P1,p2:=P2}|Acc]);
-make_vmap([], T, _, Acc) -> {e3d_kd3:to_list(T), Acc}.
+cut_edge({Edge, [V]}, Vmap, We0) ->
+    Pos = array:get(V, Vmap),
+    {We, _} = wings_edge:fast_cut(Edge, Pos, We0),
+    We.
 
-vmap({Where, Pos}, N, Tree) ->
-    case e3d_kd3:is_empty(Tree) of
-        true -> {{Where, N}, N+1, e3d_kd3:enter(Pos, N, Tree)};
-        false ->
-            {P1, V1} = e3d_kd3:nearest(Pos, Tree),
-            case e3d_vec:dist_sqr(Pos, P1) < ?EPSILON of
-                true  -> {{Where, V1}, N, Tree};
-                false -> {{Where, N}, N+1, e3d_kd3:enter(Pos, N, Tree)}
-            end
-    end.
+cut_faces(SF, _Vmap, We0) ->
+    WiFs = [{F,Vn} || {split_face, _, F,Vn} <- SF],
+    FCuts = sofs:to_external(sofs:relation_to_family(sofs:relation(WiFs, [{edge,vn}]))),
+    ?dbg("~p ~n", [FCuts]),
+    lists:foldl(fun(FCut,We) -> cut_face(FCut, Vmap, We) end, We0, FCuts).
 
-min_length(#{p1:={P1,_,_},p2:={P2,_,_}}=_Edge) ->
-    Dist2 = e3d_vec:dist_sqr(P1,P2),
-    %% ?dbg("~p ~p~n", [Edge, Dist2]),
-    Dist2 > 1.0e-15.
+cut_face({Face, [V]}, Vmap, We) ->
+    
+    We.
 
-loop_we(Loop, Id) ->
-    [loop_we_1(EdgeI, Id) || EdgeI <- Loop].
 
-loop_we_1({Point, #{mf1:=MF1, other:={_, F2}}}, Id) ->
-    case MF1 of
-	{Id, Face} -> {Face, Point};
-	_ -> {F2, Point}
-    end.
-
-make_lookup_table(Edges) ->
-    G = digraph:new(),
-    Add = fun(#{p1:={_,P1},p2:={_,P2}}=EI) ->
-                  digraph:add_vertex(G, P1),
-                  digraph:add_vertex(G, P2),
-                  digraph:add_edge(G, P1, P2, EI)
-          end,
-    _ = [Add(EI) || EI <- Edges],
-    G.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% We need to build the cycle our selfves since the edges may not be directed
+%% in the correct direction. Also the V is new Vs on edges and there maybe
+%% several new V on the same wings edge.
 
 build_vtx_loops(G, _Acc) ->
     Comps = digraph_utils:components(G),
     %?dbg("Cs: ~p: ~p~n",[G, Comps]),
     [build_vtx_loop(C, G) || C <- Comps].
 
-
-%% We need to build the cycle our selfves since the edges may not be directed
-%% in the correct direction. Also the V is new Vs on edges and there maybe
-%% several new V on the same wings edge.
 build_vtx_loop([V|_Vs], G) ->
     %% ?dbg("v: ~p~n  ", [V]),
     %% [io:format("~p ", [digraph:edge(G, E)]) || E <- digraph:edges(G,V)],
@@ -181,6 +163,51 @@ vertex_info(#{mf2:={O1,F1}, mf1:={O2,F2}, other:={O3,F3}, p2:={{_, Edge},V0}}, V
        O2 =:= Id -> {split_face, O2, F2, V0};
        O3 =:= Id -> {split_face, O3, F3, V0}
     end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+make_bvh(_, #we{id=Id, fs=Fs0}=We0, Bvhs) ->
+    Fs = gb_trees:keys(Fs0),
+    {Vtab,Ts} = triangles(Fs, We0),
+    Get = fun({verts, Face}) -> element(1, array:get(Face, Ts));
+	     (verts) -> Vtab;
+	     (meshId) -> Id
+	  end,
+    Bvh = e3d_bvh:init([{array:size(Ts), Get}]),
+    [#{id=>Id,map=>Ts,bvh=>Bvh,fs=>[],we=>We0}|Bvhs].
+
+%% BUGBUG: Should we add the We's vertexes here!!
+%% That way we can merge new verts with original Vs directly
+make_vmap([#{p1:=P10, p2:=P20}=E|R], T0, N0, Acc) ->
+    {P1, N1, T1} = vmap(P10, N0, T0),
+    {P2, N2, T2} = vmap(P20, N1, T1),
+    make_vmap(R, T2, N2, [E#{p1:=P1,p2:=P2}|Acc]);
+make_vmap([], T, _, Acc) ->
+    PosList = [Pos || {Pos,_} <- lists:keysort(2,e3d_kd3:to_list(T))],
+    {array:from_list(PosList), Acc}.
+
+vmap({Where, Pos}, N, Tree) ->
+    case e3d_kd3:is_empty(Tree) of
+        true -> {{Where, N}, N+1, e3d_kd3:enter(Pos, N, Tree)};
+        false ->
+            {P1, V1} = e3d_kd3:nearest(Pos, Tree),
+            case e3d_vec:dist_sqr(Pos, P1) < ?EPSILON of
+                true  -> {{Where, V1}, N, Tree};
+                false -> {{Where, N}, N+1, e3d_kd3:enter(Pos, N, Tree)}
+            end
+    end.
+
+make_lookup_table(Edges) ->
+    G = digraph:new(),
+    Add = fun(#{p1:={_,P1},p2:={_,P2}}=EI) ->
+                  digraph:add_vertex(G, P1),
+                  digraph:add_vertex(G, P2),
+                  digraph:add_edge(G, P1, P2, EI)
+          end,
+    _ = [Add(EI) || EI <- Edges],
+    G.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 remove(#{id:=Id}, List) ->
     Map = mapsfind(Id, id, List),
