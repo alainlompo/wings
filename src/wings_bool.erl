@@ -115,8 +115,8 @@ make_edge_loop([#{op:=split_edge}=F|_]=Loop, Vmap, We) ->
     make_edge_loop_1(Loop, F, Vmap, We);
 make_edge_loop(Loop, Vmap, We) ->
     case lists:splitwith(fun(#{op:=Op}) -> Op =:= split_face end, Loop) of
-        {_, []} -> error(nyi_impl);
-        {Fs, Edges} -> make_edge_loop(Edges++Fs, Vmap, We)
+        {FSs, []} -> split_face(FSs, Vmap, We);
+        {FSs, Edges} -> make_edge_loop(Edges++FSs, Vmap, We)
     end.
 
 make_edge_loop_1([#{op:=split_edge,v:=V1}|[#{op:=split_edge,v:=V2}|_]=Rest], Last, Vmap, We0) ->
@@ -177,6 +177,18 @@ make_face_vs_1([#{op:=split_face,v:=V}|Ss], Edge, Vmap, We0) ->
     make_face_vs_1(Ss, New, Vmap, We);
 make_face_vs_1([], _, _, We) ->
     We.
+
+split_face(Fs, Vmap, We) ->
+    Face = pick_face(Fs, undefined),
+    true = length(Fs) > 2, %% Otherwise something is wrong
+    FPos = wings_face:vertex_positions(Face, We),
+    FVs = wings_face:vertex_ccw(Face, We),
+    KD3 = e3d_kd3:from_list(lists:zip(FPos, FVs)),
+    lists:mapfoldl(fun(#{v:=Vi}, Tree) ->
+                           e3d_kd3:take_nearest(array:get(Vi, Vmap), Tree)
+                   end, KD3, Fs),
+    We.
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 filter_tri_edges({L10,L20}, We1, We2) ->
