@@ -28,8 +28,14 @@ add(#st{shapes=Sh0}=St0) ->
     Sel2 = sofs:to_external(Sel1),
     Sel = [{Id,gb_sets:from_list(L)} || {Id,L} <- Sel2],
     % ?dbg("~p~n", [Sel2]),
-    Sh = lists:foldl(fun(#{we:=We=#we{id=Id}}, Sh) ->
-                             gb_trees:update(Id, We, Sh)
+    Sh = lists:foldl(fun(#{we:=Wes}, Sh) ->
+                             case Wes of
+                                 We=#we{id=Id} ->
+                                     gb_trees:update(Id, We, Sh);
+                                 {We1=#we{id=Id1},We2=#we{id=Id2}} ->
+                                     Sh2 = gb_trees:update(Id1, We1, Sh),
+                                     gb_trees:update(Id2, We2, Sh2)
+                             end
                      end, Sh0, IntScts),
     wings_sel:set(face, Sel, St0#st{shapes=Sh}).
 
@@ -56,50 +62,127 @@ find_intersect(#{bvh:=B1}=Head, [#{bvh:=B2}=H1|Rest]) ->
 find_intersect(_Head, []) ->
     false.
 
-merge(EdgeInfo, #{id:=Id1,fs:=Fs1,we:=We1}=I1, #{id:=Id2,fs:=Fs2,we:=_We2}=I2) ->
+merge(EdgeInfo, #{id:=Id1,fs:=Fs1,we:=We1}=I1, #{id:=Id2,fs:=Fs2,we:=We2}=I2) ->
     ReEI0 = [remap(Edge, I1, I2) || Edge <- EdgeInfo],
     {Vmap, ReEI} = make_vmap(ReEI0, e3d_kd3:empty(), 0, []),
-    io:format("~p~n",[Vmap]),
     Tab = make_lookup_table(ReEI),
-    Loops = build_vtx_loops(Tab, []),
-    % [?dbg("~p~n", [Loop]) || Loop <- Loops],
+    Loops0 = build_vtx_loops(Tab, []),
+    Loops = [filter_tri_edges(Loop, We1, We2) || Loop <- Loops0],
     L1 = [split_loop(Loop, Id1) || Loop <- Loops],
-    _L2 = [split_loop(Loop, Id2) || Loop <- Loops],
-    %[?dbg("~p~n", [Loop]) || Loop <- hd(L1)],
-    %[?dbg("~p~n", [Loop]) || Loop <- hd(L2)],
+    L2 = [split_loop(Loop, Id2) || Loop <- Loops],
     We1N = make_verts(L1, Vmap, We1),
+    We2N = make_verts(L2, Vmap, We2),
     MFs = lists:flatten([[MF1,MF2] || #{mf1:=MF1,other:=MF2} <- ReEI]),
-    I1#{id:=min(Id1,Id2),fs:=Fs1++Fs2++MFs, we:=We1N}.
+    I1#{id:=min(Id1,Id2),fs:=Fs1++Fs2++MFs, we:={We1N,We2N}}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-make_verts(Loops, Vmap, We0) ->
+make_verts(Loops, Vmap0, We0) ->
     All = lists:append(Loops),
-    {SE,SF} = lists:partition(fun(Op) -> element(1, Op) =:= split_edge end, All),
-    We1 = cut_edges(SE, Vmap, We0),
-    We = cut_faces(SF, Vmap, We1),
+    SE = [SP || #{op:=split_edge}=SP <- All],
+    {Vmap, We1} = cut_edges(SE, Vmap0, We0),
+    EL = fun(Loop, We) -> make_edge_loop(Loop, Vmap, We) end,
+    We = lists:foldl(EL, We1, Loops),
+    ok = wings_we_util:validate(We),
     We.
 
 cut_edges(SE, Vmap, We0) ->
-    ?dbg("~p ~n", [SE]),
-    WiEs = [{wings_vertex:edge_through(A,B,F,We0),Vn} || {split_edge, _Id, F, {A,B}, Vn} <- SE],
+    WiEs = [{wings_vertex:edge_through(A,B,F,We0),Vn} || #{op:=split_edge, f:=F, e:={A,B}, v:=Vn} <- SE],
     ECuts = sofs:to_external(sofs:relation_to_family(sofs:relation(WiEs, [{edge,vn}]))),
-    lists:foldl(fun(ECut,We) -> cut_edge(ECut, Vmap, We) end, We0, ECuts).
+    lists:foldl(fun cut_edge/2, {Vmap, We0}, ECuts).
 
-cut_edge({Edge, [V]}, Vmap, We0) ->
+cut_edge({Edge, [V]}, {Vmap, We0}) ->
     Pos = array:get(V, Vmap),
-    {We, _} = wings_edge:fast_cut(Edge, Pos, We0),
+    {We, NewV} = wings_edge:fast_cut(Edge, Pos, We0),
+    {array:set(V, NewV, Vmap), We};
+cut_edge({Edge, Vs}, {Vmap0, #we{es=Etab}=We0}) ->
+    ?dbg("~p~n",[Edge]),
+    #edge{vs=VS,ve=VE} = array:get(Edge, Etab),
+    Pt1 = wings_vertex:pos(VS,We0),
+    Pt2 = wings_vertex:pos(VE,We0),
+    [{_,Pt3},{_,Pt4}|_] = VsPos0 = [{V,array:get(V, Vmap0)} || V <- Vs],
+    VsPos = case e3d_vec:dot(e3d_vec:sub(Pt2, Pt1), e3d_vec:sub(Pt4, Pt3)) > 0 of
+                true -> VsPos0;
+                false -> lists:reverse(VsPos0)
+            end,
+    {We,_,Vmap} = lists:foldl(fun({V,Pos}, {WE, E, Vm}) ->
+                                      {We, New} = wings_edge:fast_cut(E, Pos, WE),
+                                      {We, New, array:set(V, New, Vm)}
+                              end, {We0, Edge, Vmap0}, VsPos),
+    {Vmap, We}.
+
+make_edge_loop([#{op:=split_edge}=F|_]=Loop, Vmap, We) ->
+    ?dbg("Loop ~p~n",[Loop]),
+    make_edge_loop_1(Loop, F, Vmap, We);
+make_edge_loop(Loop, Vmap, We) ->
+    case lists:splitwith(fun(#{op:=Op}) -> Op =:= split_face end, Loop) of
+        {_, []} -> error(nyi_impl);
+        {Fs, Edges} -> make_edge_loop(Edges++Fs, Vmap, We)
+    end.
+
+make_edge_loop_1([#{op:=split_edge,v:=V1}|[#{op:=split_edge,v:=V2}|_]=Rest], Last, Vmap, We0) ->
+    {We, _New} = connect_verts(V1,V2,Vmap, We0),
+    make_edge_loop_1(Rest, Last, Vmap, We);
+make_edge_loop_1([#{op:=split_edge,v:=V1}],#{op:=split_edge,v:=V2}, Vmap, We0) ->
+    {We, _New} = connect_verts(V1,V2,Vmap, We0),
+    We;
+make_edge_loop_1([#{op:=split_edge,v:=V1}|Splits], Last, Vmap, We0) ->
+    case lists:splitwith(fun(#{op:=Op}) -> Op =:= split_face end, Splits) of
+        {FSs, []} ->
+            #{op:=split_edge,v:=V2} = Last,
+            Face = pick_face(FSs,undefined),
+            {We1, Edge} = connect_verts(V1,V2,Face,Vmap,We0),
+            ok = wings_we_util:validate(We1),
+            We = make_face_vs(FSs, array:get(V2, Vmap), Edge, Vmap, We1),
+            We;
+        {FSs, [#{op:=split_edge,v:=V2}|_]=Rest} ->
+            ?dbg("~p~n",[FSs]),
+            Face = pick_face(FSs,undefined),
+            {We1, Edge} = connect_verts(V1,V2,Face,Vmap,We0),
+            ok = wings_we_util:validate(We1),
+            We = make_face_vs(FSs, array:get(V2, Vmap), Edge, Vmap, We1),
+            make_edge_loop_1(Rest, Last, Vmap, We)
+    end.
+
+pick_face([#{f:=F}|Ss], undefined) ->
+    pick_face(Ss, F);
+pick_face([#{f:=F}|Ss], F) ->
+    pick_face(Ss, F);
+pick_face([], F) -> F.
+
+connect_verts(V1,V2,Vmap, We) ->
+    WeV1 = array:get(V1, Vmap),
+    WeV2 = array:get(V2, Vmap),
+    true = is_integer(WeV1), true = is_integer(WeV2), %% Assert
+    [Face] = [Face || {Face, [_,_]} <- wings_vertex:per_face([WeV1,WeV2],We)],
+    wings_vertex:force_connect(WeV1,WeV2,Face,We).
+
+connect_verts(V1,V2,Face,Vmap,We) ->
+    WeV1 = array:get(V1, Vmap),
+    WeV2 = array:get(V2, Vmap),
+    case wings_vertex:edge_through(WeV1,WeV2,Face,We) of
+        none -> wings_vertex:force_connect(WeV1,WeV2,Face,We);
+        Edge -> {We, Edge}
+    end.
+
+make_face_vs([_]=Ss, _Vs, Edge, Vmap, We) ->
+    make_face_vs_1(Ss, Edge, Vmap, We);
+make_face_vs(Ss, Vs, Edge, Vmap, #we{es=Etab}=We) ->
+    case array:get(Edge, Etab) of
+        #edge{vs=Vs} -> make_face_vs_1(lists:reverse(Ss), Edge, Vmap, We);
+        #edge{ve=Vs} -> make_face_vs_1(Ss, Edge, Vmap, We)
+    end.
+
+make_face_vs_1([#{op:=split_face,v:=V}|Ss], Edge, Vmap, We0) ->
+    Pos = array:get(V, Vmap),
+    {We, New} = wings_edge:fast_cut(Edge, Pos, We0),
+    make_face_vs_1(Ss, New, Vmap, We);
+make_face_vs_1([], _, _, We) ->
     We.
 
-cut_faces(SF, _Vmap, We0) ->
-    WiFs = [{F,Vn} || {split_face, _, F,Vn} <- SF],
-    FCuts = sofs:to_external(sofs:relation_to_family(sofs:relation(WiFs, [{edge,vn}]))),
-    ?dbg("~p ~n", [FCuts]),
-    lists:foldl(fun(FCut,We) -> cut_face(FCut, Vmap, We) end, We0, FCuts).
-
-cut_face({Face, [V]}, Vmap, We) ->
-    
-    We.
-
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+filter_tri_edges(Loop, _We1, _We2) ->
+    ?dbg("~p~n", [Loop]),
+    Loop.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% We need to build the cycle our selfves since the edges may not be directed
@@ -154,14 +237,14 @@ split_loop([V1], E, Id, Acc) ->
     lists:reverse([Vertex|Acc]).
 
 vertex_info(#{mf1:={O1,F1}, mf2:={O2,F2}, other:={O3,F3}, p1:={{_, Edge},V0}}, V0, Id) ->
-    if O1 =:= Id -> {split_edge, O1, F1, Edge, V0};
-       O2 =:= Id -> {split_face, O2, F2, V0};
-       O3 =:= Id -> {split_face, O3, F3, V0}
+    if O1 =:= Id -> #{op=>split_edge, o=>O1, f=>F1, e=>Edge, v=>V0};
+       O2 =:= Id -> #{op=>split_face, o=>O2, f=>F2, v=>V0};
+       O3 =:= Id -> #{op=>split_face, o=>O3, f=>F3, v=>V0}
     end;
 vertex_info(#{mf2:={O1,F1}, mf1:={O2,F2}, other:={O3,F3}, p2:={{_, Edge},V0}}, V0, Id) ->
-    if O1 =:= Id -> {split_edge, O1, F1, Edge, V0};
-       O2 =:= Id -> {split_face, O2, F2, V0};
-       O3 =:= Id -> {split_face, O3, F3, V0}
+    if O1 =:= Id -> #{op=>split_edge, o=>O1, f=>F1, e=>Edge, v=>V0};
+       O2 =:= Id -> #{op=>split_face, o=>O2, f=>F2, v=>V0};
+       O3 =:= Id -> #{op=>split_face, o=>O3, f=>F3, v=>V0}
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
