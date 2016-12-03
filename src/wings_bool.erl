@@ -67,9 +67,10 @@ merge(EdgeInfo, #{id:=Id1,fs:=Fs1,we:=We1}=I1, #{id:=Id2,fs:=Fs2,we:=We2}=I2) ->
     {Vmap, ReEI} = make_vmap(ReEI0, e3d_kd3:empty(), 0, []),
     Tab = make_lookup_table(ReEI),
     Loops0 = build_vtx_loops(Tab, []),
-    Loops = [filter_tri_edges(Loop, We1, We2) || Loop <- Loops0],
-    L1 = [split_loop(Loop, Id1) || Loop <- Loops],
-    L2 = [split_loop(Loop, Id2) || Loop <- Loops],
+    L10 = [split_loop(Loop, Id1) || Loop <- Loops0],
+    L20 = [split_loop(Loop, Id2) || Loop <- Loops0],
+    Loops = [filter_tri_edges(Loop, We1, We2) || Loop <- lists:zip(L10,L20)],
+    {L1,L2} = lists:unzip(Loops),
     We1N = make_verts(L1, Vmap, We1),
     We2N = make_verts(L2, Vmap, We2),
     MFs = lists:flatten([[MF1,MF2] || #{mf1:=MF1,other:=MF2} <- ReEI]),
@@ -86,7 +87,7 @@ make_verts(Loops, Vmap0, We0) ->
     We.
 
 cut_edges(SE, Vmap, We0) ->
-    WiEs = [{wings_vertex:edge_through(A,B,F,We0),Vn} || #{op:=split_edge, f:=F, e:={A,B}, v:=Vn} <- SE],
+    WiEs = [{E,Vn} || #{op:=split_edge, e:=E, v:=Vn} <- SE],
     ECuts = sofs:to_external(sofs:relation_to_family(sofs:relation(WiEs, [{edge,vn}]))),
     lists:foldl(fun cut_edge/2, {Vmap, We0}, ECuts).
 
@@ -95,7 +96,6 @@ cut_edge({Edge, [V]}, {Vmap, We0}) ->
     {We, NewV} = wings_edge:fast_cut(Edge, Pos, We0),
     {array:set(V, NewV, Vmap), We};
 cut_edge({Edge, Vs}, {Vmap0, #we{es=Etab}=We0}) ->
-    ?dbg("~p~n",[Edge]),
     #edge{vs=VS,ve=VE} = array:get(Edge, Etab),
     Pt1 = wings_vertex:pos(VS,We0),
     Pt2 = wings_vertex:pos(VE,We0),
@@ -135,7 +135,6 @@ make_edge_loop_1([#{op:=split_edge,v:=V1}|Splits], Last, Vmap, We0) ->
             We = make_face_vs(FSs, array:get(V2, Vmap), Edge, Vmap, We1),
             We;
         {FSs, [#{op:=split_edge,v:=V2}|_]=Rest} ->
-            ?dbg("~p~n",[FSs]),
             Face = pick_face(FSs,undefined),
             {We1, Edge} = connect_verts(V1,V2,Face,Vmap,We0),
             ok = wings_we_util:validate(We1),
@@ -180,9 +179,35 @@ make_face_vs_1([], _, _, We) ->
     We.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-filter_tri_edges(Loop, _We1, _We2) ->
-    ?dbg("~p~n", [Loop]),
-    Loop.
+filter_tri_edges({L10,L20}, We1, We2) ->
+    Replace = fun(#{op:=split_edge, f:=Face,e:={A,B}}=V, We) ->
+                      V#{e:=wings_vertex:edge_through(A,B,Face,We)};
+                 (V,_) -> V
+              end,
+    L1 = [Replace(E,We1) || E <- L10],
+    L2 = [Replace(E,We2) || E <- L20],
+    Loop = lists:zip(L1,L2),
+    lists:unzip(filter_tri_edges(Loop)).
+
+filter_tri_edges([{#{op:=split_edge,e:=none},#{op:=split_edge, e:=none}}|Vs]) ->
+    filter_tri_edges(Vs);
+filter_tri_edges([{#{op:=split_edge,e:=none}=V1,#{op:=Op}=V2}|Vs]) ->
+    case Op of
+        split_face -> filter_tri_edges(Vs);
+        split_edge -> [{edge_to_face(V1), V2}|filter_tri_edges(Vs)]
+    end;
+filter_tri_edges([{#{op:=Op}=V1,#{op:=split_edge,e:=none}=V2}|Vs]) ->
+    case Op of
+        split_face -> filter_tri_edges(Vs);
+        split_edge -> [{V1,edge_to_face(V2)}|filter_tri_edges(Vs)]
+    end;
+filter_tri_edges([V|Vs]) ->
+    [V|filter_tri_edges(Vs)];
+filter_tri_edges([]) -> [].
+
+edge_to_face(#{op:=split_edge, o:=O, f:=F, v:=V}) ->
+    #{op=>split_face, o=>O, f=>F, v=>V}.
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% We need to build the cycle our selfves since the edges may not be directed
