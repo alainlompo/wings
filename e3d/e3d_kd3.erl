@@ -169,9 +169,9 @@ to_list(Data, Acc) -> Data++Acc.
 %%% or undefined
 take_nearest({_,_,_}, #e3d_kd3{tree=[]}) -> undefined;
 take_nearest({_,_,_} = Point, Orig = #e3d_kd3{tree=Tree}) ->
-    [_|[Node|_]=Closest] = nearest_1(Point, Tree, [undefined|undefined]),
-    Foo = [P1|| {P1,_} <- Closest],
-    io:format("Pick: ~p ~p~n=> ~p~n", [Point, Point =:= hd(Foo), Closest]),
+    [_|[Node|_]=_Closest] = nearest_1(Point, Tree, [undefined|undefined]),
+    %%Foo = [P1|| {P1,_} <- _Closest],
+    %io:format("Pick: ~p ~p~n=> ~p~n", [Point, Point =:= hd(Foo), Closest]),
     {Node, delete_object(Node,Orig)}.
 
 %%% @spec (Key::point(), Tree::e3d_kd3()) -> object() | undefined

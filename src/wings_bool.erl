@@ -158,6 +158,7 @@ connect_verts(V1,V2,Vmap, We) ->
 connect_verts(V1,V2,Face,Vmap,We) ->
     WeV1 = array:get(V1, Vmap),
     WeV2 = array:get(V2, Vmap),
+    true = is_integer(WeV1), true = is_integer(WeV2), %% Assert
     case wings_vertex:edge_through(WeV1,WeV2,Face,We) of
         none -> wings_vertex:force_connect(WeV1,WeV2,Face,We);
         Edge -> {We, Edge}
@@ -178,17 +179,63 @@ make_face_vs_1([#{op:=split_face,v:=V}|Ss], Edge, Vmap, We0) ->
 make_face_vs_1([], _, _, We) ->
     We.
 
-split_face(Fs, Vmap, We) ->
+split_face(Fs, Vmap, We0) ->
     Face = pick_face(Fs, undefined),
-    true = length(Fs) > 2, %% Otherwise something is wrong
-    FPos = wings_face:vertex_positions(Face, We),
-    FVs = wings_face:vertex_ccw(Face, We),
-    KD3 = e3d_kd3:from_list(lists:zip(FPos, FVs)),
-    lists:mapfoldl(fun(#{v:=Vi}, Tree) ->
-                           e3d_kd3:take_nearest(array:get(Vi, Vmap), Tree)
-                   end, KD3, Fs),
-    We.
+    NumberOfNew = length(Fs),
+    true = NumberOfNew > 2, %% Otherwise something is wrong
+    We1 = wings_extrude_face:faces([Face], We0),
+    FVs = wings_face:vertices_ccw(Face, We1),
+    FPos = wings_face:vertex_positions(Face, We1),
+    Zipped = lists:zip(FPos, FVs),
+    ?dbg("Orig: ~p~n", [FVs]),
+    NumberOfOld = length(FVs),
+    case NumberOfOld >= NumberOfNew of
+	true ->
+	    KD3 = e3d_kd3:from_list(Zipped),
+	    {Vs,_} = lists:mapfoldl(fun(#{v:=Vi}, Tree0) ->
+					    Pos = array:get(Vi, Vmap),
+					    {{_,V}, Tree} = e3d_kd3:take_nearest(Pos, Tree0),
+					    {{V,Pos},Tree}
+				    end, KD3, Fs),
+	    Vtab = lists:foldl(fun({V,Pos}, Vtab) -> array:set(V, Pos, Vtab) end,
+			       We1#we.vp, Vs),
+	    ?dbg("Vs ~p~n",[Vs]),
+	    %%  TODO loop through FVs instead... and cleanup
+	    check_edges(Vs, hd(Vs), Face, We1#we{vp=Vtab});
+	false ->
+	    KD3 = e3d_kd3:from_list([{array:get(Vi, Vmap), FS} || #{v:=Vi}=FS <- Fs]),
+	    {Vs,_} = lists:mapfoldl(fun({Old, V}, Tree0) ->
+					    {{Pos,FS}, Tree} = e3d_kd3:take_nearest(Old, Tree0),
+					    {{V,Pos,FS},Tree}
+				    end, KD3, FVs),
+	    Vtab = lists:foldl(fun({V, Pos, _}, Vtab) -> array:set(V, Pos, Vtab) end,
+			       We1#we.vp, Vs),
+	    Fs1 = lists:map(fun(FS) -> case lists:keyfind(FS, 3, Vs) of
+					   false -> FS;
+					   {_,_,_} -> FS#{op:=split_edge}
+				       end
+			    end, Fs),
+	    Vmap1 = lists:foldl(fun({V, _, #{v:=Vi}}, Map) -> array:set(Vi, V, Map) end,
+				Vmap, Vs),
+	    make_edge_loop(Fs1, Vmap1, We1#we{vp=Vtab})
+    end.
 
+check_edges([{V1,_}|[{V2,_}|_]=Vs], Last, Face, We) ->
+    case wings_vertex:edge_through(V1,V2,Face,We) of
+        none ->
+	    ?dbg("C ~p ~p~n",[V1,V2]),
+	    {We1,_} = wings_vertex:force_connect(V2,V1,Face,We),
+	    check_edges(Vs,Last,Face,We1);
+        _Edge -> check_edges(Vs,Last,Face,We)
+    end;
+check_edges([{V1,_}], {V2,_}, Face, We) ->
+    case wings_vertex:edge_through(V2,V1,Face,We) of
+        none ->
+	    ?dbg("C ~p ~p~n",[V1,V2]),
+	    {We1,_} = wings_vertex:force_connect(V1,V2,Face,We),
+	    We1;
+        _Edge -> We
+    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 filter_tri_edges({L10,L20}, We1, We2) ->
