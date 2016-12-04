@@ -67,9 +67,9 @@ merge(EdgeInfo, #{id:=Id1,fs:=Fs1,we:=We1}=I1, #{id:=Id2,fs:=Fs2,we:=We2}=I2) ->
     {Vmap, ReEI} = make_vmap(ReEI0, e3d_kd3:empty(), 0, []),
     Tab = make_lookup_table(ReEI),
     Loops0 = build_vtx_loops(Tab, []),
-    L10 = [split_loop(Loop, Id1) || Loop <- Loops0],
-    L20 = [split_loop(Loop, Id2) || Loop <- Loops0],
-    Loops = [filter_tri_edges(Loop, We1, We2) || Loop <- lists:zip(L10,L20)],
+    L10 = [split_loop(Loop, {We1,We2}) || Loop <- Loops0],
+    L20 = [split_loop(Loop, {We2,We1}) || Loop <- Loops0],
+    Loops = [filter_tri_edges(Loop) || Loop <- lists:zip(L10,L20)],
     {L1,L2} = lists:unzip(Loops),
     We1N = make_verts(L1, Vmap, We1),
     We2N = make_verts(L2, Vmap, We2),
@@ -125,7 +125,7 @@ make_edge_loop_1([#{op:=split_edge,v:=V1}|[#{op:=split_edge,v:=V2}|_]=Rest], Las
 make_edge_loop_1([#{op:=split_edge,v:=V1}],#{op:=split_edge,v:=V2}, Vmap, We0) ->
     {We, _New} = connect_verts(V1,V2,Vmap, We0),
     We;
-make_edge_loop_1([#{op:=split_edge,v:=V1}|Splits], Last, Vmap, We0) ->
+make_edge_loop_1([#{op:=split_edge,v:=V1}=E1|Splits], Last, Vmap, We0) ->
     case lists:splitwith(fun(#{op:=Op}) -> Op =:= split_face end, Splits) of
         {FSs, []} ->
             #{op:=split_edge,v:=V2} = Last,
@@ -134,10 +134,13 @@ make_edge_loop_1([#{op:=split_edge,v:=V1}|Splits], Last, Vmap, We0) ->
             ok = wings_we_util:validate(We1),
             We = make_face_vs(FSs, array:get(V2, Vmap), Edge, Vmap, We1),
             We;
-        {FSs, [#{op:=split_edge,v:=V2}|_]=Rest} ->
+        {FSs, [#{op:=split_edge,v:=V2}=E2|_]=Rest} ->
             Face = pick_face(FSs,undefined),
+            ?dbg("~p: ~p~n ~p~n ~p~n",[Face,E1,E2,FSs]),
+            ok = wings_we_util:validate(We0),
             {We1, Edge} = connect_verts(V1,V2,Face,Vmap,We0),
             ok = wings_we_util:validate(We1),
+            ?dbg("done ~p ~p ~p ~n",[Face,V1,V2]),
             We = make_face_vs(FSs, array:get(V2, Vmap), Edge, Vmap, We1),
             make_edge_loop_1(Rest, Last, Vmap, We)
     end.
@@ -160,6 +163,7 @@ connect_verts(V1,V2,Face,Vmap,We) ->
     WeV1 = array:get(V1, Vmap),
     WeV2 = array:get(V2, Vmap),
     true = is_integer(WeV1), true = is_integer(WeV2), %% Assert
+    ?dbg("~p ~p(~p) ~p(~p) ~n", [Face, V1,WeV1,V2,WeV2]),
     case wings_vertex:edge_through(WeV1,WeV2,Face,We) of
         none -> wings_vertex:force_connect(WeV1,WeV2,Face,We);
         Edge -> {We, Edge}
@@ -200,8 +204,6 @@ split_face(Fs, Vmap, We0) ->
 				    end, KD3, Fs),
 	    Vtab = lists:foldl(fun({V,Pos}, Vtab) -> array:set(V, Pos, Vtab) end,
 			       We1#we.vp, Vs),
-	    ?dbg("Vs ~p~n",[[V||{V,_}<-Vs]]),
-            ?dbg("FVs ~p~n",[FVs]),
             cleanup_edges(FVs, [V||{V,_}<-Vs], Face, We1#we{vp=Vtab});
 	false ->
 	    KD3 = e3d_kd3:from_list([{array:get(Vi, Vmap), FS} || #{v:=Vi}=FS <- Fs]),
@@ -229,7 +231,6 @@ cleanup_edges(FVs, Used, Face, We) ->
 cleanup_edges([V1|[V2|Vs]=Vs0], Connect, Last, Drop, Used, Face, We0) ->
     case lists:member(V2, Used) of
         true when Connect ->
-            ?dbg("connect ~p ~p~n", [V1,V2]),
             {We, _} = wings_vertex:force_connect(V2,V1,Face,We0),
             cleanup_edges(Vs0, false, Last, Drop, Used, Face, We);
         true -> cleanup_edges(Vs0, false, Last, Drop, Used, Face, We0);
@@ -238,12 +239,11 @@ cleanup_edges([V1|[V2|Vs]=Vs0], Connect, Last, Drop, Used, Face, We0) ->
 cleanup_edges([V1], Connect, Last, Drop, _Used, Face, We0) ->
     We2 = case Connect of
               true ->
-                  ?dbg("connect ~p ~p~n", [V1,Last]),
                   {We1, _} = wings_vertex:force_connect(Last,V1,Face,We0),
                   We1;
               false -> We0
           end,
-    ?dbg("drop vs ~p~n",[Drop]),
+    % ?dbg("drop vs ~p~n",[Drop]),
     Es = wings_edge:from_vs(Drop, We2),
     ?dbg("drop es ~p~n",[Es]),
     We3 = wings_edge:dissolve_edges(Es, We2),
@@ -251,33 +251,33 @@ cleanup_edges([V1], Connect, Last, Drop, _Used, Face, We0) ->
     We3.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-filter_tri_edges({L10,L20}, We1, We2) ->
-    Replace = fun(#{op:=split_edge, f:=Face,e:={A,B}}=V, We) ->
-                      V#{e:=wings_vertex:edge_through(A,B,Face,We)};
-                 (V,_) -> V
-              end,
-    L1 = [Replace(E,We1) || E <- L10],
-    L2 = [Replace(E,We2) || E <- L20],
+filter_tri_edges({L1,L2}) ->
     ?dbg("~p~n",[L1]),
     ?dbg("~p~n",[L2]),
     Loop = lists:zip(L1,L2),
-    lists:unzip(filter_tri_edges(Loop)).
+    lists:unzip(filter_tri_edges_1(Loop)).
 
-filter_tri_edges([{#{op:=split_edge,e:=none},#{op:=split_edge, e:=none}}|Vs]) ->
-    filter_tri_edges(Vs);
-filter_tri_edges([{#{op:=split_edge,e:=none}=V1,#{op:=Op}=V2}|Vs]) ->
+filter_tri_edges_1([{#{op:=split_edge,e:=none},#{op:=split_edge, e:=none}}|Vs]) ->
+    filter_tri_edges_1(Vs);
+filter_tri_edges_1([{#{op:=split_edge,e:=none}=V1,#{op:=Op}=V2}|Vs]) ->
     case Op of
-        split_face -> filter_tri_edges(Vs);
-        split_edge -> [{edge_to_face(V1), V2}|filter_tri_edges(Vs)]
+        split_face -> filter_tri_edges_1(Vs);
+        split_edge -> [{edge_to_face(V1), V2}|filter_tri_edges_1(Vs)]
     end;
-filter_tri_edges([{#{op:=Op}=V1,#{op:=split_edge,e:=none}=V2}|Vs]) ->
+filter_tri_edges_1([{#{op:=Op}=V1,#{op:=split_edge,e:=none}=V2}|Vs]) ->
     case Op of
-        split_face -> filter_tri_edges(Vs);
-        split_edge -> [{V1,edge_to_face(V2)}|filter_tri_edges(Vs)]
+        split_face -> filter_tri_edges_1(Vs);
+        split_edge -> [{V1,edge_to_face(V2)}|filter_tri_edges_1(Vs)]
     end;
-filter_tri_edges([V|Vs]) ->
-    [V|filter_tri_edges(Vs)];
-filter_tri_edges([]) -> [].
+filter_tri_edges_1([{#{v:=V}=V1,U1}, {#{v:=V}=V2, U2}|Vs]) ->
+    %% Remove edges to it self (loops)
+    filter_tri_edges_1([{filter_edge(V1,V2),filter_edge(U1,U2)}|Vs]);
+filter_tri_edges_1([V|Vs]) ->
+    [V|filter_tri_edges_1(Vs)];
+filter_tri_edges_1([]) -> [].
+
+filter_edge(_, #{op:=split_edge}=V2) -> V2;
+filter_edge(V1,_) -> V1.
 
 edge_to_face(#{op:=split_edge, o:=O, f:=F, v:=V}) ->
     #{op=>split_face, o=>O, f=>F, v=>V}.
@@ -325,26 +325,49 @@ pick_edge([{E,N,V,Ei}|R], V, _Best) ->
     pick_edge(R, V, {E,N,Ei});
 pick_edge([], _, Best) -> Best.
 
-split_loop([Last|Loop], Id1) ->
-    split_loop(Loop, Last, Id1, []).
+split_loop([Last|Loop], We) ->
+    split_loop(Loop, Last, We, []).
 
-split_loop([V1,E|Loop], Last, Id, Acc) when is_integer(V1) ->
-    Vertex = vertex_info(E, V1, Id),
-    split_loop(Loop, Last, Id, [Vertex|Acc]);
-split_loop([V1], E, Id, Acc) ->
-    Vertex = vertex_info(E, V1, Id),
+split_loop([V1,E|Loop], Last, We, Acc) when is_integer(V1) ->
+    Vertex = vertex_info(E, V1, We),
+    split_loop(Loop, Last, We, [Vertex|Acc]);
+split_loop([V1], E, We, Acc) ->
+    Vertex = vertex_info(E, V1, We),
     lists:reverse([Vertex|Acc]).
 
-vertex_info(#{mf1:={O1,F1}, mf2:={O2,F2}, other:={O3,F3}, p1:={{_, Edge},V0}}, V0, Id) ->
-    if O1 =:= Id -> #{op=>split_edge, o=>O1, f=>F1, e=>Edge, v=>V0};
-       O2 =:= Id -> #{op=>split_face, o=>O2, f=>F2, v=>V0};
-       O3 =:= Id -> #{op=>split_face, o=>O3, f=>F3, v=>V0}
+vertex_info(#{mf1:={O1,F1}, mf2:={O2,F2}, other:={O3,F3}, p1:={{_, Edge0},V0}}, V0, {#we{id=Id}=We,OWe}) ->
+    if O1 =:= Id ->
+            {A,B} = Edge0,
+            Edge = wings_vertex:edge_through(A,B,F1,We),
+            %?dbg("~p ~p ~p (~p)~n",[O1,O2,O3,We#we.id]),
+            Inv = if O2=:=Id -> edge_invert_dir(Edge, We, F3, OWe);
+                     true -> edge_invert_dir(Edge, We, F2, OWe)
+                  end,
+            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, inv=>Inv};
+       O2 =:= Id -> #{op=>split_face, o=>Id, f=>F2, v=>V0};
+       O3 =:= Id -> #{op=>split_face, o=>Id, f=>F3, v=>V0}
     end;
-vertex_info(#{mf2:={O1,F1}, mf1:={O2,F2}, other:={O3,F3}, p2:={{_, Edge},V0}}, V0, Id) ->
-    if O1 =:= Id -> #{op=>split_edge, o=>O1, f=>F1, e=>Edge, v=>V0};
-       O2 =:= Id -> #{op=>split_face, o=>O2, f=>F2, v=>V0};
-       O3 =:= Id -> #{op=>split_face, o=>O3, f=>F3, v=>V0}
+vertex_info(#{mf2:={O1,F1}, mf1:={O2,F2}, other:={O3,F3}, p2:={{_, Edge0},V0}}, V0, {#we{id=Id}=We,OWe}) ->
+    if O1 =:= Id ->
+            {A,B} = Edge0,
+            Edge = wings_vertex:edge_through(A,B,F1,We),
+            %?dbg("~p ~p ~p (~p)~n",[O1,O2,O3,We#we.id]),
+            Inv = if O2=:=Id -> edge_invert_dir(Edge, We, F3, OWe);
+                     true -> edge_invert_dir(Edge, We, F2, OWe)
+                  end,
+            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, inv=>Inv};
+       O2 =:= Id -> #{op=>split_face, o=>Id, f=>F2, v=>V0};
+       O3 =:= Id -> #{op=>split_face, o=>Id, f=>F3, v=>V0}
     end.
+
+edge_invert_dir(none, _, _, _) -> undefined; %% Removed later
+edge_invert_dir(Ei, #we{es=Etab,vp=VPos}, Face, Other) ->
+    #edge{vs=VS,ve=VE} = array:get(Ei,Etab),
+    Pt1 = array:get(VS,VPos),
+    Pt2 = array:get(VE,VPos),
+    Dir = e3d_vec:sub(Pt2, Pt1),
+    Normal = wings_face:normal(Face, Other),
+    e3d_vec:dot(Dir, Normal) >= 0.0.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
