@@ -152,6 +152,7 @@ connect_verts(V1,V2,Vmap, We) ->
     WeV1 = array:get(V1, Vmap),
     WeV2 = array:get(V2, Vmap),
     true = is_integer(WeV1), true = is_integer(WeV2), %% Assert
+    ?dbg("~p(~p) ~p(~p) ~n", [V1,WeV1,V2,WeV2]),
     [Face] = [Face || {Face, [_,_]} <- wings_vertex:per_face([WeV1,WeV2],We)],
     wings_vertex:force_connect(WeV1,WeV2,Face,We).
 
@@ -199,15 +200,15 @@ split_face(Fs, Vmap, We0) ->
 				    end, KD3, Fs),
 	    Vtab = lists:foldl(fun({V,Pos}, Vtab) -> array:set(V, Pos, Vtab) end,
 			       We1#we.vp, Vs),
-	    ?dbg("Vs ~p~n",[Vs]),
-	    %%  TODO loop through FVs instead... and cleanup
-	    check_edges(Vs, hd(Vs), Face, We1#we{vp=Vtab});
+	    ?dbg("Vs ~p~n",[[V||{V,_}<-Vs]]),
+            ?dbg("FVs ~p~n",[FVs]),
+            cleanup_edges(FVs, [V||{V,_}<-Vs], Face, We1#we{vp=Vtab});
 	false ->
 	    KD3 = e3d_kd3:from_list([{array:get(Vi, Vmap), FS} || #{v:=Vi}=FS <- Fs]),
 	    {Vs,_} = lists:mapfoldl(fun({Old, V}, Tree0) ->
 					    {{Pos,FS}, Tree} = e3d_kd3:take_nearest(Old, Tree0),
 					    {{V,Pos,FS},Tree}
-				    end, KD3, FVs),
+				    end, KD3, Zipped),
 	    Vtab = lists:foldl(fun({V, Pos, _}, Vtab) -> array:set(V, Pos, Vtab) end,
 			       We1#we.vp, Vs),
 	    Fs1 = lists:map(fun(FS) -> case lists:keyfind(FS, 3, Vs) of
@@ -220,22 +221,34 @@ split_face(Fs, Vmap, We0) ->
 	    make_edge_loop(Fs1, Vmap1, We1#we{vp=Vtab})
     end.
 
-check_edges([{V1,_}|[{V2,_}|_]=Vs], Last, Face, We) ->
-    case wings_vertex:edge_through(V1,V2,Face,We) of
-        none ->
-	    ?dbg("C ~p ~p~n",[V1,V2]),
-	    {We1,_} = wings_vertex:force_connect(V2,V1,Face,We),
-	    check_edges(Vs,Last,Face,We1);
-        _Edge -> check_edges(Vs,Last,Face,We)
+cleanup_edges(FVs, Used, Face, We) ->
+    %% Start with a used vertex
+    {Vs1,Vs0} = lists:splitwith(fun(V) -> not lists:member(V, Used) end, FVs),
+    cleanup_edges(Vs0++Vs1, false, hd(Vs0), [], Used, Face, We).
+
+cleanup_edges([V1|[V2|Vs]=Vs0], Connect, Last, Drop, Used, Face, We0) ->
+    case lists:member(V2, Used) of
+        true when Connect ->
+            ?dbg("connect ~p ~p~n", [V1,V2]),
+            {We, _} = wings_vertex:force_connect(V2,V1,Face,We0),
+            cleanup_edges(Vs0, false, Last, Drop, Used, Face, We);
+        true -> cleanup_edges(Vs0, false, Last, Drop, Used, Face, We0);
+        false -> cleanup_edges([V1|Vs], true, Last, [V2|Drop], Used, Face, We0)
     end;
-check_edges([{V1,_}], {V2,_}, Face, We) ->
-    case wings_vertex:edge_through(V2,V1,Face,We) of
-        none ->
-	    ?dbg("C ~p ~p~n",[V1,V2]),
-	    {We1,_} = wings_vertex:force_connect(V1,V2,Face,We),
-	    We1;
-        _Edge -> We
-    end.
+cleanup_edges([V1], Connect, Last, Drop, _Used, Face, We0) ->
+    We2 = case Connect of
+              true ->
+                  ?dbg("connect ~p ~p~n", [V1,Last]),
+                  {We1, _} = wings_vertex:force_connect(Last,V1,Face,We0),
+                  We1;
+              false -> We0
+          end,
+    ?dbg("drop vs ~p~n",[Drop]),
+    Es = wings_edge:from_vs(Drop, We2),
+    ?dbg("drop es ~p~n",[Es]),
+    We3 = wings_edge:dissolve_edges(Es, We2),
+    ok = wings_we_util:validate(We3),
+    We3.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 filter_tri_edges({L10,L20}, We1, We2) ->
@@ -245,6 +258,8 @@ filter_tri_edges({L10,L20}, We1, We2) ->
               end,
     L1 = [Replace(E,We1) || E <- L10],
     L2 = [Replace(E,We2) || E <- L20],
+    ?dbg("~p~n",[L1]),
+    ?dbg("~p~n",[L2]),
     Loop = lists:zip(L1,L2),
     lists:unzip(filter_tri_edges(Loop)).
 
