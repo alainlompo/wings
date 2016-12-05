@@ -119,29 +119,29 @@ make_edge_loop(Loop, Vmap, We) ->
         {FSs, Edges} -> make_edge_loop(Edges++FSs, Vmap, We)
     end.
 
-make_edge_loop_1([#{op:=split_edge,v:=V1}|[#{op:=split_edge,v:=V2}|_]=Rest], Last, Vmap, We0) ->
+make_edge_loop_1([#{op:=split_edge}=V1|[#{op:=split_edge}=V2|_]=Rest], Last, Vmap, We0) ->
     {We, _New} = connect_verts(V1,V2,Vmap, We0),
     make_edge_loop_1(Rest, Last, Vmap, We);
-make_edge_loop_1([#{op:=split_edge,v:=V1}],#{op:=split_edge,v:=V2}, Vmap, We0) ->
+make_edge_loop_1([#{op:=split_edge}=V1],#{op:=split_edge}=V2, Vmap, We0) ->
     {We, _New} = connect_verts(V1,V2,Vmap, We0),
     We;
-make_edge_loop_1([#{op:=split_edge,v:=V1}=E1|Splits], Last, Vmap, We0) ->
+make_edge_loop_1([#{op:=split_edge}=V1|Splits], Last, Vmap, We0) ->
     case lists:splitwith(fun(#{op:=Op}) -> Op =:= split_face end, Splits) of
         {FSs, []} ->
             #{op:=split_edge,v:=V2} = Last,
             Face = pick_face(FSs,undefined),
-            {We1, Edge} = connect_verts(V1,V2,Face,Vmap,We0),
+            {We1, Edge} = connect_verts(V1,Last,Face,Vmap,We0),
             ok = wings_we_util:validate(We1),
             We = make_face_vs(FSs, array:get(V2, Vmap), Edge, Vmap, We1),
             We;
-        {FSs, [#{op:=split_edge,v:=V2}=E2|_]=Rest} ->
+        {FSs, [#{op:=split_edge,v:=VV2}=V2|_]=Rest} ->
             Face = pick_face(FSs,undefined),
-            ?dbg("~p: ~p~n ~p~n ~p~n",[Face,E1,E2,FSs]),
+            %%?dbg("~p: ~p~n ~p~n ~p~n",[Face,E1,E2,FSs]),
             ok = wings_we_util:validate(We0),
             {We1, Edge} = connect_verts(V1,V2,Face,Vmap,We0),
             ok = wings_we_util:validate(We1),
-            ?dbg("done ~p ~p ~p ~n",[Face,V1,V2]),
-            We = make_face_vs(FSs, array:get(V2, Vmap), Edge, Vmap, We1),
+            %%?dbg("done ~p ~p ~p ~n",[Face,V1,V2]),
+            We = make_face_vs(FSs, array:get(VV2, Vmap), Edge, Vmap, We1),
             make_edge_loop_1(Rest, Last, Vmap, We)
     end.
 
@@ -151,21 +151,36 @@ pick_face([#{f:=F}|Ss], F) ->
     pick_face(Ss, F);
 pick_face([], F) -> F.
 
-connect_verts(V1,V2,Vmap, We) ->
+connect_verts(#{v:=V1, inv:=I1},#{v:=V2,inv:=I2},Vmap, We) ->
     WeV1 = array:get(V1, Vmap),
     WeV2 = array:get(V2, Vmap),
     true = is_integer(WeV1), true = is_integer(WeV2), %% Assert
-    ?dbg("~p(~p) ~p(~p) ~n", [V1,WeV1,V2,WeV2]),
     [Face] = [Face || {Face, [_,_]} <- wings_vertex:per_face([WeV1,WeV2],We)],
-    wings_vertex:force_connect(WeV1,WeV2,Face,We).
+    ?dbg("~p ~p(~p) ~p ~p(~p) ~p ~n", [Face, V1,WeV1,I1,V2,WeV2,I2]),
+    if I1 andalso I2 ->
+            wings_vertex:force_connect(WeV2,WeV1,Face,We);
+       (not I1) andalso (not I2) ->
+            wings_vertex:force_connect(WeV2,WeV1,Face,We);
+       true ->
+            ?dbg("~p: XXX ~p ~p~n",[Face,I1,I2]),
+            wings_vertex:force_connect(WeV1,WeV2,Face,We)
+    end.
 
-connect_verts(V1,V2,Face,Vmap,We) ->
+connect_verts(#{v:=V1, inv:=I1},#{v:=V2,inv:=I2},Face,Vmap,We) ->
     WeV1 = array:get(V1, Vmap),
     WeV2 = array:get(V2, Vmap),
     true = is_integer(WeV1), true = is_integer(WeV2), %% Assert
-    ?dbg("~p ~p(~p) ~p(~p) ~n", [Face, V1,WeV1,V2,WeV2]),
+    ?dbg("~p ~p(~p) ~p ~p(~p) ~p ~n", [Face, V1,WeV1,I1,V2,WeV2,I2]),
     case wings_vertex:edge_through(WeV1,WeV2,Face,We) of
-        none -> wings_vertex:force_connect(WeV1,WeV2,Face,We);
+        none ->
+            if I1 andalso I2 ->
+                    wings_vertex:force_connect(WeV2,WeV1,Face,We);
+               (not I1) andalso (not I2) ->
+                    wings_vertex:force_connect(WeV2,WeV1,Face,We);
+               true ->
+                    ?dbg("~p: XXX ~p ~p~n",[Face,I1,I2]),
+                    wings_vertex:force_connect(WeV2,WeV1,Face,We)
+            end;
         Edge -> {We, Edge}
     end.
 
