@@ -64,7 +64,7 @@ find_intersect(_Head, []) ->
 
 merge(EdgeInfo, #{id:=Id1,fs:=Fs1,we:=We1}=I1, #{id:=Id2,fs:=Fs2,we:=We2}=I2) ->
     ReEI0 = [remap(Edge, I1, I2) || Edge <- EdgeInfo],
-    {Vmap, ReEI} = make_vmap(ReEI0, e3d_kd3:empty(), 0, []),
+    {Vmap, ReEI} = make_vmap(ReEI0, We1, We2),
     Tab = make_lookup_table(ReEI),
     Loops0 = build_vtx_loops(Tab, []),
     L10 = [split_loop(Loop, {We1,We2}) || Loop <- Loops0],
@@ -204,7 +204,7 @@ split_face(Fs, Vmap, We0) ->
     We1 = wings_extrude_face:faces([Face], We0),
     FVs = wings_face:vertices_ccw(Face, We1),
     FPos = wings_face:vertex_positions(Face, We1),
-    Zipped = lists:zip(FPos, FVs),
+    Zipped = lists:zip(FVs, FPos),
     ?dbg("Orig: ~p~n", [FVs]),
     NumberOfOld = length(FVs),
     case NumberOfOld >= NumberOfNew of
@@ -212,16 +212,16 @@ split_face(Fs, Vmap, We0) ->
 	    KD3 = e3d_kd3:from_list(Zipped),
 	    {Vs,_} = lists:mapfoldl(fun(#{v:=Vi}, Tree0) ->
 					    Pos = array:get(Vi, Vmap),
-					    {{_,V}, Tree} = e3d_kd3:take_nearest(Pos, Tree0),
+					    {{V,_}, Tree} = e3d_kd3:take_nearest(Pos, Tree0),
 					    {{V,Pos},Tree}
 				    end, KD3, Fs),
 	    Vtab = lists:foldl(fun({V,Pos}, Vtab) -> array:set(V, Pos, Vtab) end,
 			       We1#we.vp, Vs),
             cleanup_edges(FVs, [V||{V,_}<-Vs], Face, We1#we{vp=Vtab});
 	false ->
-	    KD3 = e3d_kd3:from_list([{array:get(Vi, Vmap), FS} || #{v:=Vi}=FS <- Fs]),
-	    {Vs,_} = lists:mapfoldl(fun({Old, V}, Tree0) ->
-					    {{Pos,FS}, Tree} = e3d_kd3:take_nearest(Old, Tree0),
+	    KD3 = e3d_kd3:from_list([{FS, array:get(Vi, Vmap)} || #{v:=Vi}=FS <- Fs]),
+	    {Vs,_} = lists:mapfoldl(fun({V, Old}, Tree0) ->
+					    {{FS,Pos}, Tree} = e3d_kd3:take_nearest(Old, Tree0),
 					    {{V,Pos,FS},Tree}
 				    end, KD3, Zipped),
 	    Vtab = lists:foldl(fun({V, Pos, _}, Vtab) -> array:set(V, Pos, Vtab) end,
@@ -394,19 +394,21 @@ make_bvh(_, #we{id=Id, fs=Fs0}=We0, Bvhs) ->
 
 %% BUGBUG: Should we add the We's vertexes here!!
 %% That way we can merge new verts with original Vs directly
+make_vmap(ReEI0, _We1, _We2) ->
+    make_vmap(ReEI0, e3d_kd3:empty(), 0, []).
+
 make_vmap([#{p1:=P10, p2:=P20}=E|R], T0, N0, Acc) ->
     {P1, N1, T1} = vmap(P10, N0, T0),
     {P2, N2, T2} = vmap(P20, N1, T1),
     make_vmap(R, T2, N2, [E#{p1:=P1,p2:=P2}|Acc]);
 make_vmap([], T, _, Acc) ->
-    PosList = [Pos || {Pos,_} <- lists:keysort(2,e3d_kd3:to_list(T))],
-    {array:from_list(PosList), Acc}.
+    {array:from_orddict(lists:sort(e3d_kd3:to_list(T))), Acc}.
 
 vmap({Where, Pos}, N, Tree) ->
     case e3d_kd3:is_empty(Tree) of
         true -> {{Where, N}, N+1, e3d_kd3:enter(Pos, N, Tree)};
         false ->
-            {P1, V1} = e3d_kd3:nearest(Pos, Tree),
+            {V1, P1} = e3d_kd3:nearest(Pos, Tree),
             case e3d_vec:dist_sqr(Pos, P1) < ?EPSILON of
                 true  -> {{Where, V1}, N, Tree};
                 false -> {{Where, N}, N+1, e3d_kd3:enter(Pos, N, Tree)}
@@ -499,7 +501,7 @@ tri_poly(Vs, #we{vp=Vtab}=We, Face, Acc0) ->
 renumber_and_add_vs([_|Ps], [V|Vs], Index, Vtab, Acc) ->
     renumber_and_add_vs(Ps, Vs, Index, Vtab, [V|Acc]);
 renumber_and_add_vs([Pos|Ps], [], Index, Vtab0, Acc) ->
-    Vtab = array:add(Index, Pos, Vtab0),
+    Vtab = array:set(Index, Pos, Vtab0),
     renumber_and_add_vs(Ps, [], Index+1, Vtab, [Index|Acc]);
 renumber_and_add_vs([], [], _, Vtab, Vs) ->
     {Vtab, list_to_tuple(lists:reverse(Vs))}.

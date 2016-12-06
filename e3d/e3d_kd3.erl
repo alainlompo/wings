@@ -11,7 +11,7 @@
 
 %%% @doc kd-tree from wikipedia 1 Jul 2009
 %%%      Builds and traverses kd-tree of dimension 3 i.e. keys are {X,Y,Z}
-%%%      
+%%%
 %%%      Each object is a 2-tuple, {point(), value} where point is a tuple
 %%%      of size 3 and value is any term.
 %%%
@@ -36,37 +36,41 @@
 %% 	 map/2
 	]).
 
+-include("e3d.hrl").  %% For types
+
 -define(REBALANCE, 0.7). %% Rebalance after % deletions
--define(NODE(Point,Axis,Left,Right), {Point,Axis,Left,Right}). 
+-define(NODE(Point,Axis,Left,Right), {Point,Axis,Left,Right}).
 
--type point()   :: {number(), number(), number()}.
--type object()  :: {point(), term()}.
+-type kd3_object()  :: {term(), e3d_point()}.
 
-%% Internal 
--type tree() ::  [object()] |
-		   {Med   :: float(), 
+%% Internal
+-type tree() ::  [kd3_object()] |
+		   {Med   :: float(),
 		    Axis  :: integer(),
-		    Left  :: tree(), 
+		    Left  :: tree(),
 		    Right :: tree()}.
 
 -record(e3d_kd3, { tree=[] :: tree() }).
-  %%, total=0 :: integer(), deleted=0 :: integer()}).
+-type e3d_kd3() :: #e3d_kd3{}.
 
-%%% @spec () -> kd-tree().
+-export_type([e3d_kd3/0]).
+
 %%% @doc Returns an empty Tree.
+-spec empty() -> e3d_kd3().
 empty() -> #e3d_kd3{tree=[]}.
 
-%%% @spec (Tree::kd-tree()) -> boolean().
 %%% @doc Returns true if Tree is an empty tree.
+-spec is_empty(e3d_kd3()) -> boolean().
 is_empty(#e3d_kd3{tree=[]}) -> true;
 is_empty(#e3d_kd3{}) -> false.
 
+-spec is_kd3(e3d_kd3()) -> boolean().
 is_kd3(#e3d_kd3{}) -> true;
 is_kd3(_) -> false.
 
-%%% @spec (Tree::kd-tree()) -> integer().
 %%% @doc Returns the number of objects in the Tree.
 %%% Note: This function currently traverses the tree.
+-spec size(e3d_kd3()) -> integer().
 size(#e3d_kd3{tree=Tree}) ->
     size_1(Tree, 0).
 
@@ -75,9 +79,9 @@ size_1({_, _, L0, R0}, Sz) ->
 size_1(List, Sz) ->
     Sz + length(List).
 
-%%% @spec (point(), Tree1::e3d_kd3()) -> Tree2::e3d_kd3().
 %%% @doc Removes all the node(s) with key Point from Tree1 and returns the new Tree2
 %%% assumes the Key is present otherwise it crashes.
+-spec delete(e3d_point(), e3d_kd3()) -> e3d_kd3().
 delete({_,_,_} = Point, #e3d_kd3{tree=Tree}) ->
     #e3d_kd3{tree=delete_1(Point, Tree)}.
 
@@ -90,19 +94,19 @@ delete_1(Key,{Med, Axis, L0, R0}) ->
 	    L = delete_1(Key, L0),
 	    delete_2(Med, Axis, L, R0)
     end;
-delete_1(Key, [{Key,_}|_]) -> [].
+delete_1(Key, [{_,Key}|_]) -> [].
 
 delete_2(_, _, [], R)    -> R;
 delete_2(_, _, L, [])    -> L;
 delete_2(Med, Axis, L, R) -> ?NODE(Med,Axis,L,R).
-    
-%%% @spec (object(), Tree1::e3d_kd3()) -> Tree2::e3d_kd3().
+
 %%% @doc Removes the Object from Tree1 and returns the new Tree2
 %%% crashes if object is not present.
-delete_object({{_,_,_},_} = Object, _T=#e3d_kd3{tree=Tree}) ->
+-spec delete_object(kd3_object(), e3d_kd3()) -> e3d_kd3().
+delete_object({_,{_,_,_}} = Object, _T=#e3d_kd3{tree=Tree}) ->
     #e3d_kd3{tree=delete_object_1(Object, Tree)}.
 
-delete_object_1({Key,_}=Object,{Med, Axis, L0, R0}) ->
+delete_object_1({_,Key}=Object,{Med, Axis, L0, R0}) ->
     case Med < element(Axis, Key)  of
 	true ->
 	    R = delete_object_1(Object, R0),
@@ -126,12 +130,12 @@ delete_object_3(Object, [H|T], Acc) ->
 %%     from_list(to_list(Tree));
 %%rebalence(T) -> T.
 
-%%% @spec ([object()]) -> e3d_kd3().
 %%% @doc Builds a kd-tree from a list of objects.
-from_list([]) -> 
+-spec from_list([kd3_object()]) -> e3d_kd3().
+from_list([]) ->
     #e3d_kd3{tree=[]};
 from_list(List) ->
-    {_N,BB} = lists:foldl(fun({Point, _}, {N,BB}) -> {N+1,e3d_bv:union(BB, Point)} end, 
+    {_N,BB} = lists:foldl(fun({_, Point}, {N,BB}) -> {N+1,e3d_bv:union(BB, Point)} end,
 			  {0,e3d_bv:box()}, List),
     #e3d_kd3{tree=from_list(List, BB)}. %, total=N}.
 
@@ -148,14 +152,14 @@ from_list(List = [_|_], BB) ->
     end;
 from_list(Data, _) -> Data.
 
-%%% @spec (object(), e3d_kd3()) -> e3d_kd3()
 %%% @doc  Add node to the tree.
-enter(Point, Id, #e3d_kd3{tree=Tree0}) ->
-    Tree = add_1({Point, Id}, Tree0),
+-spec enter(e3d_point(), term(), e3d_kd3()) -> e3d_kd3().
+enter(Point, Data, #e3d_kd3{tree=Tree0}) ->
+    Tree = add_1({Data, Point}, Tree0),
     #e3d_kd3{tree=Tree}.
 
-%%% @spec (e3d_kd3()) -> [object()]
 %%% @doc  Return all nodes in the tree.
+-spec to_list(e3d_kd3()) -> [kd3_object()].
 to_list(#e3d_kd3{tree=Tree}) ->
     to_list(Tree, []).
 
@@ -164,9 +168,10 @@ to_list({_,_, L,R}, Acc0) ->
 to_list([], Acc) -> Acc;
 to_list(Data, Acc) -> Data++Acc.
 
-%%% @spec (Point::tuple(), Tree::e3d_kd3()) -> {object(), e3d_kd3()} | undefined
+%%% @spec (Point::tuple(), Tree::e3d_kd3()) -> {kd3_object(), e3d_kd3()} | undefined
 %%% @doc Returns the Object nearest the Point and a Tree with the Object deleted,
 %%% or undefined
+-spec take_nearest(e3d_point(), Tree::e3d_kd3()) -> {kd3_object(), e3d_kd3()} | undefined.
 take_nearest({_,_,_}, #e3d_kd3{tree=[]}) -> undefined;
 take_nearest({_,_,_} = Point, Orig = #e3d_kd3{tree=Tree}) ->
     [_|[Node|_]=_Closest] = nearest_1(Point, Tree, [undefined|undefined]),
@@ -174,8 +179,8 @@ take_nearest({_,_,_} = Point, Orig = #e3d_kd3{tree=Tree}) ->
     %io:format("Pick: ~p ~p~n=> ~p~n", [Point, Point =:= hd(Foo), Closest]),
     {Node, delete_object(Node,Orig)}.
 
-%%% @spec (Key::point(), Tree::e3d_kd3()) -> object() | undefined
 %%% @doc Returns the object nearest the Key, or undefined if table is empty.
+-spec nearest(Key::e3d_point(), Tree::e3d_kd3()) -> kd3_object() | undefined.
 nearest({_,_,_} = Point, #e3d_kd3{tree=Tree}) ->
     [_|[Node|_]] = nearest_1(Point, Tree, [undefined|undefined]),
     Node.
@@ -188,7 +193,7 @@ nearest_1(Point, {SplitPos,Axis,L,R}, Closest) ->
 	true  -> nearest_2(Point, R, L, Border, Closest);
 	false -> nearest_2(Point, L, R, Border, Closest)
     end;
-nearest_1(Point,[{Pos,_}|_] = Leaf, Closest0) ->
+nearest_1(Point,[{_,Pos}|_] = Leaf, Closest0) ->
     closest([e3d_vec:dist_sqr(Pos, Point)|Leaf],Closest0);
 nearest_1(_, [], Close) -> Close.
 
@@ -200,9 +205,9 @@ nearest_2(Point, ThisSide, OtherSide, Border, Closest0) ->
 	    nearest_1(Point, OtherSide, Closest)
     end.
 
-%%% @spec (Fun/2, Acc0::term(), Key::point(), Dist, Tree::e3d_kd3()) -> Acc::term()
-%%% @doc Traverse all Objects within Dist distance from point, notice that the order 
+%%% @doc Traverse all Objects within Dist distance from point, notice that the order
 %%% is not specified.
+-spec fold(fun((kd3_object(),Acc::term()) -> term()), term(), e3d_point(), float(), e3d_kd3()) -> term().
 fold(Fun, Acc, {_,_,_} = Point, Dist, #e3d_kd3{tree=Tree}) ->
     fold_1(Tree, Point, Dist*Dist, Fun, Acc).
 
@@ -219,9 +224,9 @@ fold_1({SplitPos,Axis,L,R}, Point, Dist2, Fun, Acc0) ->
 	    fold_1(L, Point, Dist2, Fun, Acc0)
     end;
 fold_1([], _Point, _Dist2, _Fun, Acc) -> Acc;
-fold_1(List = [{Pos,_}|_], Point, Dist2, Fun, Acc) ->
+fold_1(List = [{_,Pos}|_], Point, Dist2, Fun, Acc) ->
     case e3d_vec:dist_sqr(Pos, Point) =< Dist2 of
-	true -> 
+	true ->
 	    lists:foldl(Fun, Acc, List);
 	false ->
 	    Acc
@@ -231,9 +236,9 @@ fold_1(List = [{Pos,_}|_], Point, Dist2, Fun, Acc) ->
 split(List, Axis, Pos) ->
     split(List, Axis, Pos, [], e3d_bv:box(), [], e3d_bv:box()).
 
-split([H = {V,_}|T], Axis, Pos, L, LB, R, RB) ->
+split([H = {_,V}|T], Axis, Pos, L, LB, R, RB) ->
     case element(Axis, V) =< Pos of
-	true -> 
+	true ->
 	    split(T, Axis, Pos, [H|L], e3d_bv:union(LB,V), R, RB);
 	false ->
 	    split(T, Axis, Pos, L, LB, [H|R], e3d_bv:union(RB,V))
@@ -245,7 +250,7 @@ closest([Dist1|_]=Node1, [Dist2|_]) when Dist1 < Dist2 -> Node1;
 closest(_, Node) -> Node.
 
 add_1(P0, []) -> [P0];
-add_1({P0,_}=Obj, [{P1,_}|_]=T0) ->
+add_1({_,P0}=Obj, [{_,P1}|_]=T0) ->
     BB = e3d_bv:box(P0, P1),
     case e3d_bv:max_extent(BB) of
 	undefined -> %% All positions are exactly the same
@@ -257,7 +262,7 @@ add_1({P0,_}=Obj, [{P1,_}|_]=T0) ->
 		  from_list(Left,  LBB),
 		  from_list(Right, RBB))
     end;
-add_1({P0,_}=Obj, {SplitPos, Axis, L, R}) ->
+add_1({_,P0}=Obj, {SplitPos, Axis, L, R}) ->
     PointPos = element(Axis, P0),
     case SplitPos < PointPos of
 	true  -> {SplitPos, Axis, L, add_1(Obj, R)};
