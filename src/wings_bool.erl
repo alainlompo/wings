@@ -151,37 +151,35 @@ pick_face([#{f:=F}|Ss], F) ->
     pick_face(Ss, F);
 pick_face([], F) -> F.
 
-connect_verts(#{v:=V1, inv:=I1},#{v:=V2,inv:=I2},Vmap, We) ->
+connect_verts(#{v:=V1, o_n:=N1},#{v:=V2,o_n:=N2}, Vmap, #we{vp=Vtab}=We) ->
     WeV1 = array:get(V1, Vmap),
     WeV2 = array:get(V2, Vmap),
     true = is_integer(WeV1), true = is_integer(WeV2), %% Assert
     [Face] = [Face || {Face, [_,_]} <- wings_vertex:per_face([WeV1,WeV2],We)],
-    ?dbg("~p ~p(~p) ~p ~p(~p) ~p ~n", [Face, V1,WeV1,I1,V2,WeV2,I2]),
-    if I1 andalso I2 ->
-            wings_vertex:force_connect(WeV2,WeV1,Face,We);
-       (not I1) andalso (not I2) ->
-            wings_vertex:force_connect(WeV2,WeV1,Face,We);
-       true ->
-            ?dbg("~p: XXX ~p ~p~n",[Face,I1,I2]),
-            wings_vertex:force_connect(WeV1,WeV2,Face,We)
+    % ?dbg("~p ~p(~p) ~p ~p(~p) ~p ~n", [Face, V1,WeV1,I1,V2,WeV2,I2]),
+    N = wings_face:normal(Face, We),
+    Dir = e3d_vec:cross(N,e3d_vec:sub(array:get(WeV1,Vtab),array:get(WeV2,Vtab))),
+    case 0 >= e3d_vec:dot(e3d_vec:average(N1,N2), Dir) of
+        true  -> wings_vertex:force_connect(WeV1,WeV2,Face,We);
+        false -> wings_vertex:force_connect(WeV2,WeV1,Face,We)
     end.
 
-connect_verts(#{v:=V1, inv:=I1},#{v:=V2,inv:=I2},Face,Vmap,We) ->
+connect_verts(#{v:=V1, o_n:=N1},#{v:=V2,o_n:=N2},Face,Vmap, #we{vp=Vtab}=We) ->
     WeV1 = array:get(V1, Vmap),
     WeV2 = array:get(V2, Vmap),
     true = is_integer(WeV1), true = is_integer(WeV2), %% Assert
-    ?dbg("~p ~p(~p) ~p ~p(~p) ~p ~n", [Face, V1,WeV1,I1,V2,WeV2,I2]),
+    % ?dbg("~p ~p(~p) ~p ~p(~p) ~p ~n", [Face, V1,WeV1,I1,V2,WeV2,I2]),
     case wings_vertex:edge_through(WeV1,WeV2,Face,We) of
         none ->
-            if I1 andalso I2 ->
-                    wings_vertex:force_connect(WeV2,WeV1,Face,We);
-               (not I1) andalso (not I2) ->
-                    wings_vertex:force_connect(WeV2,WeV1,Face,We);
-               true ->
-                    ?dbg("~p: XXX ~p ~p~n",[Face,I1,I2]),
-                    wings_vertex:force_connect(WeV2,WeV1,Face,We)
+            N = wings_face:normal(Face, We),
+            Dir = e3d_vec:cross(N,e3d_vec:sub(array:get(WeV1,Vtab),array:get(WeV2,Vtab))),
+            case 0 >= e3d_vec:dot(e3d_vec:average(N1,N2), Dir) of
+                true  -> wings_vertex:force_connect(WeV1,WeV2,Face,We);
+                false -> wings_vertex:force_connect(WeV2,WeV1,Face,We)
             end;
-        Edge -> {We, Edge}
+        Edge ->
+            %% Bugbug face should not be included in result
+            {We, Edge}
     end.
 
 make_face_vs([_]=Ss, _Vs, Edge, Vmap, We) ->
@@ -354,11 +352,10 @@ vertex_info(#{mf1:={O1,F1}, mf2:={O2,F2}, other:={O3,F3}, p1:={{_, Edge0},V0}}, 
     if O1 =:= Id ->
             {A,B} = Edge0,
             Edge = wings_vertex:edge_through(A,B,F1,We),
-            %?dbg("~p ~p ~p (~p)~n",[O1,O2,O3,We#we.id]),
-            Inv = if O2=:=Id -> edge_invert_dir(Edge, We, F3, OWe);
-                     true -> edge_invert_dir(Edge, We, F2, OWe)
-                  end,
-            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, inv=>Inv};
+            N = if O2=:=Id -> wings_face:normal(F3, OWe);
+                   true -> wings_face:normal(F2, OWe)
+                end,
+            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, o_n=>N};
        O2 =:= Id -> #{op=>split_face, o=>Id, f=>F2, v=>V0};
        O3 =:= Id -> #{op=>split_face, o=>Id, f=>F3, v=>V0}
     end;
@@ -366,11 +363,10 @@ vertex_info(#{mf2:={O1,F1}, mf1:={O2,F2}, other:={O3,F3}, p2:={{_, Edge0},V0}}, 
     if O1 =:= Id ->
             {A,B} = Edge0,
             Edge = wings_vertex:edge_through(A,B,F1,We),
-            %?dbg("~p ~p ~p (~p)~n",[O1,O2,O3,We#we.id]),
-            Inv = if O2=:=Id -> edge_invert_dir(Edge, We, F3, OWe);
-                     true -> edge_invert_dir(Edge, We, F2, OWe)
-                  end,
-            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, inv=>Inv};
+            N = if O2=:=Id -> wings_face:normal(F3, OWe);
+                   true -> wings_face:normal(F2, OWe)
+                end,
+            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, o_n=>N};
        O2 =:= Id -> #{op=>split_face, o=>Id, f=>F2, v=>V0};
        O3 =:= Id -> #{op=>split_face, o=>Id, f=>F3, v=>V0}
     end.
