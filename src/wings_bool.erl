@@ -63,16 +63,19 @@ find_intersect(_Head, []) ->
     false.
 
 merge(EdgeInfo, #{id:=Id1,fs:=Fs1,we:=We1}=I1, #{id:=Id2,fs:=Fs2,we:=We2}=I2) ->
+    %?dbg("~p~n",[EdgeInfo]),
     ReEI0 = [remap(Edge, I1, I2) || Edge <- EdgeInfo],
+    %?dbg("~p~n",[ReEI0]),
     {Vmap, ReEI} = make_vmap(ReEI0, We1, We2),
+    ?dbg("~p~n",[Vmap]),
+    ?dbg("~p~n",[ReEI]),
     Tab = make_lookup_table(ReEI),
     Loops0 = build_vtx_loops(Tab, []),
+    ?dbg("~p~n",[Loops0]),
     L10 = [split_loop(Loop, Vmap, {We1,We2}) || Loop <- Loops0],
     L20 = [split_loop(Loop, Vmap, {We2,We1}) || Loop <- Loops0],
     Loops = [filter_tri_edges(Loop) || Loop <- lists:zip(L10,L20)],
     {L1,L2} = lists:unzip(Loops),
-    ?dbg("After Tri ~w~n",[?FUNCTION_NAME]),
-    [ begin [io:format(" ~w~n",[V]) || V <- List], io:nl() end|| List <- L2],
     We1N = make_verts(L1, Vmap, We1),
     We2N = make_verts(L2, Vmap, We2),
     MFs = lists:flatten([[MF1,MF2] || #{mf1:=MF1,other:=MF2} <- ReEI]),
@@ -306,28 +309,23 @@ edge_to_face(#{op:=split_edge}=Orig) ->
 
 build_vtx_loops(G, _Acc) ->
     Comps = digraph_utils:components(G),
-    %?dbg("Cs: ~p: ~p~n",[G, Comps]),
+    ?dbg("Cs: ~p~n",[Comps]),
     [build_vtx_loop(C, G) || C <- Comps].
 
 build_vtx_loop([V|_Vs], G) ->
-    [Edge|_] = case digraph:out_edges(G,V) of
-                 [] -> digraph:in_edges(G,V);
-                 Out -> Out
-             end,
-    case digraph:edge(G, Edge) of
-        {_, _, _, #{p1:={_,V}, p2:={_,Next}}=Ei} -> Next;
-        {_, _, _, #{p2:={_,V}, p1:={_,Next}}=Ei} -> Next
-    end,
-    digraph:del_edge(G, Edge),
-    build_vtx_loop(Next, V, G, [Ei,V]).
+    case build_vtx_loop(V, G, []) of
+        {V, Acc} -> Acc;
+        {_, _} -> error(incomplete_edge_loop)
+    end.
 
-build_vtx_loop(Start, Start, _G, Acc) ->
-    Acc;
-build_vtx_loop(V0, Start, G, Acc) ->
-    Es = [digraph:edge(G, E) || E <- digraph:edges(G, V0)],
-    {Edge, Next, Ei} = pick_edge(Es, V0, undefined),
-    digraph:del_edge(G, Edge),
-    build_vtx_loop(Next, Start, G, [Ei,V0|Acc]).
+build_vtx_loop(V0, G, Acc) ->
+    case [digraph:edge(G, E) || E <- digraph:edges(G, V0)] of
+        [] -> {V0, Acc};
+        Es ->
+            {Edge, Next, Ei} = pick_edge(Es, V0, undefined),
+            digraph:del_edge(G, Edge),
+            build_vtx_loop(Next, G, [Ei,V0|Acc])
+    end.
 
 pick_edge([{E,V,V,Ei}|_], V, _Best) ->
     {E, V, Ei}; %% Self cyclic pick first
@@ -341,12 +339,34 @@ split_loop([Last|Loop], Vmap, We) ->
     split_loop(Loop, Last, Vmap, We, []).
 
 split_loop([V1,E|Loop], Last, Vmap, We, Acc) when is_integer(V1) ->
+    ?dbg("~p: ~p in ~p~n",[(element(1,We))#we.id,V1,E]),
     Vertex = vertex_info(E, V1, Vmap, We),
     split_loop(Loop, Last, Vmap, We, [Vertex|Acc]);
 split_loop([V1], E, Vmap, We, Acc) ->
+    ?dbg("~p: ~p in ~p~n",[(element(1,We))#we.id,V1,E]),
     Vertex = vertex_info(E, V1, Vmap, We),
     lists:reverse([Vertex|Acc]).
 
+vertex_info(#{mf1:={O1,F1}, mf2:={O2,F2}, other:={O3,F3},
+              p1:={{_, {A1,B1}=Edge1},V0},
+              p2:={{_, {A2,B2}=Edge2},V0}},
+            V0, Vmap, {#we{id=Id}=We,OWe}) ->
+    if O1 =:= Id ->
+            N = if O2=:=Id -> wings_face:normal(F3, OWe);
+                   true -> wings_face:normal(F2, OWe)
+                end,
+            Edge = wings_vertex:edge_through(A1,B1,F1,We),
+            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, vs=>Edge1, o_n=>N};
+       O2 =:= Id ->
+            N = if O1=:=Id -> wings_face:normal(F3, OWe);
+                   true -> wings_face:normal(F1, OWe)
+                end,
+            Edge = wings_vertex:edge_through(A2,B2,F2,We),
+            #{op=>split_edge, o=>Id, f=>F2, e=>Edge, v=>V0, vs=>Edge2, o_n=>N};
+       O3 =:= Id ->
+            N = wings_face:normal(F1, OWe),
+            check_if_edge(#{op=>split_face, o=>Id, f=>F3, v=>V0}, N, Vmap, We)
+    end;
 vertex_info(#{mf1:={O1,F1}, mf2:={O2,F2}, other:={O3,F3}, p1:={{_, {A,B}=Edge0},V0}}, V0,
             Vmap, {#we{id=Id}=We,OWe}) ->
     if O1 =:= Id ->
