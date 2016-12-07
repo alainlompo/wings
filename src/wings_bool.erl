@@ -17,7 +17,7 @@
 -include("wings.hrl").
 
 -compile(export_all).
--define(EPSILON, 1.0e-15).
+-define(EPSILON, 1.0e-10).  %% used without SQRT() => 1.0e-5
 
 add(#st{shapes=Sh0}=St0) ->
     MapBvh = wings_sel:fold(fun make_bvh/3, [], St0),
@@ -67,10 +67,12 @@ merge(EdgeInfo, #{id:=Id1,fs:=Fs1,we:=We1}=I1, #{id:=Id2,fs:=Fs2,we:=We2}=I2) ->
     {Vmap, ReEI} = make_vmap(ReEI0, We1, We2),
     Tab = make_lookup_table(ReEI),
     Loops0 = build_vtx_loops(Tab, []),
-    L10 = [split_loop(Loop, {We1,We2}) || Loop <- Loops0],
-    L20 = [split_loop(Loop, {We2,We1}) || Loop <- Loops0],
+    L10 = [split_loop(Loop, Vmap, {We1,We2}) || Loop <- Loops0],
+    L20 = [split_loop(Loop, Vmap, {We2,We1}) || Loop <- Loops0],
     Loops = [filter_tri_edges(Loop) || Loop <- lists:zip(L10,L20)],
     {L1,L2} = lists:unzip(Loops),
+    ?dbg("After Tri ~w~n",[?FUNCTION_NAME]),
+    [ begin [io:format(" ~w~n",[V]) || V <- List], io:nl() end|| List <- L2],
     We1N = make_verts(L1, Vmap, We1),
     We2N = make_verts(L2, Vmap, We2),
     MFs = lists:flatten([[MF1,MF2] || #{mf1:=MF1,other:=MF2} <- ReEI]),
@@ -111,7 +113,7 @@ cut_edge({Edge, Vs}, {Vmap0, #we{es=Etab}=We0}) ->
     {Vmap, We}.
 
 make_edge_loop([#{op:=split_edge}=F|_]=Loop, Vmap, We) ->
-    ?dbg("Loop ~p~n",[Loop]),
+    ?dbg("MakeEdgeLoop~n",[]), [io:format(" ~w~n", [L]) || L <- Loop],
     make_edge_loop_1(Loop, F, Vmap, We);
 make_edge_loop(Loop, Vmap, We) ->
     case lists:splitwith(fun(#{op:=Op}) -> Op =:= split_face end, Loop) of
@@ -170,6 +172,8 @@ connect_verts(#{v:=V1, o_n:=N1},#{v:=V2,o_n:=N2},Face,Vmap, #we{vp=Vtab}=We) ->
     true = is_integer(WeV1), true = is_integer(WeV2), %% Assert
     % ?dbg("~p ~p(~p) ~p ~p(~p) ~p ~n", [Face, V1,WeV1,I1,V2,WeV2,I2]),
     case wings_vertex:edge_through(WeV1,WeV2,Face,We) of
+        none when N1 =:= ignore ->
+            wings_vertex:force_connect(WeV1,WeV2,Face,We);
         none ->
             N = wings_face:normal(Face, We),
             Dir = e3d_vec:cross(N,e3d_vec:sub(array:get(WeV1,Vtab),array:get(WeV2,Vtab))),
@@ -228,7 +232,7 @@ split_face(Fs, Vmap, We0) ->
 			       We1#we.vp, Vs),
 	    Fs1 = lists:map(fun(FS) -> case lists:keyfind(FS, 3, Vs) of
 					   false -> FS;
-					   {_,_,_} -> FS#{op:=split_edge}
+					   {_,_,_} -> FS#{op:=split_edge, o_n=>ignore}
 				       end
 			    end, Fs),
 	    Vmap1 = lists:foldl(fun({V, _, #{v:=Vi}}, Map) -> array:set(Vi, V, Map) end,
@@ -265,9 +269,8 @@ cleanup_edges([V1], Connect, Last, Drop, _Used, Face, We0) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 filter_tri_edges({L1,L2}) ->
-    ?dbg("~p~n",[L1]),
-    ?dbg("~p~n",[L2]),
     Loop = lists:zip(L1,L2),
+    %?dbg("~p~n",[?FUNCTION_NAME]), [io:format("1: ~w~n2: ~w~n~n",[K1,K2])||{K1,K2}<-Loop],
     lists:unzip(filter_tri_edges_1(Loop)).
 
 filter_tri_edges_1([{#{op:=split_edge,e:=none},#{op:=split_edge, e:=none}}|Vs]) ->
@@ -289,11 +292,11 @@ filter_tri_edges_1([V|Vs]) ->
     [V|filter_tri_edges_1(Vs)];
 filter_tri_edges_1([]) -> [].
 
-filter_edge(_, #{op:=split_edge}=V2) -> V2;
+filter_edge(_, #{op:=split_edge, e:=Edge}=V2) when Edge =/= none -> V2;
 filter_edge(V1,_) -> V1.
 
-edge_to_face(#{op:=split_edge, o:=O, f:=F, v:=V}) ->
-    #{op=>split_face, o=>O, f=>F, v=>V}.
+edge_to_face(#{op:=split_edge}=Orig) ->
+    Orig#{op=>split_face}.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -307,9 +310,6 @@ build_vtx_loops(G, _Acc) ->
     [build_vtx_loop(C, G) || C <- Comps].
 
 build_vtx_loop([V|_Vs], G) ->
-    %% ?dbg("v: ~p~n  ", [V]),
-    %% [io:format("~p ", [digraph:edge(G, E)]) || E <- digraph:edges(G,V)],
-    %% io:nl(),
     [Edge|_] = case digraph:out_edges(G,V) of
                  [] -> digraph:in_edges(G,V);
                  Out -> Out
@@ -325,7 +325,6 @@ build_vtx_loop(Start, Start, _G, Acc) ->
     Acc;
 build_vtx_loop(V0, Start, G, Acc) ->
     Es = [digraph:edge(G, E) || E <- digraph:edges(G, V0)],
-    %% ?dbg("~p => ~p ~n",[V0, Es]),
     {Edge, Next, Ei} = pick_edge(Es, V0, undefined),
     digraph:del_edge(G, Edge),
     build_vtx_loop(Next, Start, G, [Ei,V0|Acc]).
@@ -338,47 +337,61 @@ pick_edge([{E,N,V,Ei}|R], V, _Best) ->
     pick_edge(R, V, {E,N,Ei});
 pick_edge([], _, Best) -> Best.
 
-split_loop([Last|Loop], We) ->
-    split_loop(Loop, Last, We, []).
+split_loop([Last|Loop], Vmap, We) ->
+    split_loop(Loop, Last, Vmap, We, []).
 
-split_loop([V1,E|Loop], Last, We, Acc) when is_integer(V1) ->
-    Vertex = vertex_info(E, V1, We),
-    split_loop(Loop, Last, We, [Vertex|Acc]);
-split_loop([V1], E, We, Acc) ->
-    Vertex = vertex_info(E, V1, We),
+split_loop([V1,E|Loop], Last, Vmap, We, Acc) when is_integer(V1) ->
+    Vertex = vertex_info(E, V1, Vmap, We),
+    split_loop(Loop, Last, Vmap, We, [Vertex|Acc]);
+split_loop([V1], E, Vmap, We, Acc) ->
+    Vertex = vertex_info(E, V1, Vmap, We),
     lists:reverse([Vertex|Acc]).
 
-vertex_info(#{mf1:={O1,F1}, mf2:={O2,F2}, other:={O3,F3}, p1:={{_, Edge0},V0}}, V0, {#we{id=Id}=We,OWe}) ->
+vertex_info(#{mf1:={O1,F1}, mf2:={O2,F2}, other:={O3,F3}, p1:={{_, {A,B}=Edge0},V0}}, V0,
+            Vmap, {#we{id=Id}=We,OWe}) ->
     if O1 =:= Id ->
-            {A,B} = Edge0,
-            Edge = wings_vertex:edge_through(A,B,F1,We),
             N = if O2=:=Id -> wings_face:normal(F3, OWe);
                    true -> wings_face:normal(F2, OWe)
                 end,
-            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, o_n=>N};
-       O2 =:= Id -> #{op=>split_face, o=>Id, f=>F2, v=>V0};
-       O3 =:= Id -> #{op=>split_face, o=>Id, f=>F3, v=>V0}
+            Edge = wings_vertex:edge_through(A,B,F1,We),
+            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, vs=>Edge0, o_n=>N};
+       O2 =:= Id ->
+            N = wings_face:normal(F1, OWe),
+            check_if_edge(#{op=>split_face, o=>Id, f=>F2, v=>V0}, N, Vmap, We);
+       O3 =:= Id ->
+            N = wings_face:normal(F1, OWe),
+            check_if_edge(#{op=>split_face, o=>Id, f=>F3, v=>V0}, N, Vmap, We)
     end;
-vertex_info(#{mf2:={O1,F1}, mf1:={O2,F2}, other:={O3,F3}, p2:={{_, Edge0},V0}}, V0, {#we{id=Id}=We,OWe}) ->
+vertex_info(#{mf2:={O1,F1}, mf1:={O2,F2}, other:={O3,F3}, p2:={{_, {A,B}=Edge0},V0}}, V0,
+            Vmap, {#we{id=Id}=We,OWe}) ->
     if O1 =:= Id ->
-            {A,B} = Edge0,
-            Edge = wings_vertex:edge_through(A,B,F1,We),
             N = if O2=:=Id -> wings_face:normal(F3, OWe);
                    true -> wings_face:normal(F2, OWe)
                 end,
-            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, o_n=>N};
-       O2 =:= Id -> #{op=>split_face, o=>Id, f=>F2, v=>V0};
-       O3 =:= Id -> #{op=>split_face, o=>Id, f=>F3, v=>V0}
+            Edge = wings_vertex:edge_through(A,B,F1,We),
+            #{op=>split_edge, o=>Id, f=>F1, e=>Edge, v=>V0, vs=>Edge0, o_n=>N};
+       O2 =:= Id ->
+            N = wings_face:normal(F1, OWe),
+            check_if_edge(#{op=>split_face, o=>Id, f=>F2, v=>V0}, N, Vmap, We);
+       O3 =:= Id ->
+            N = wings_face:normal(F1, OWe),
+            check_if_edge(#{op=>split_face, o=>Id, f=>F3, v=>V0}, N, Vmap, We)
     end.
 
-edge_invert_dir(none, _, _, _) -> undefined; %% Removed later
-edge_invert_dir(Ei, #we{es=Etab,vp=VPos}, Face, Other) ->
-    #edge{vs=VS,ve=VE} = array:get(Ei,Etab),
-    Pt1 = array:get(VS,VPos),
-    Pt2 = array:get(VE,VPos),
-    Dir = e3d_vec:sub(Pt2, Pt1),
-    Normal = wings_face:normal(Face, Other),
-    e3d_vec:dot(Dir, Normal) >= 0.0.
+check_if_edge(#{f:=F, v:=V}=SF, N, Vmap, #we{vp=Vtab}=We) ->
+    Pos = array:get(V, Vmap),
+    Find = fun(_,Edge,#edge{vs=V1,ve=V2},Acc) ->
+                   V1P = array:get(V1, Vtab),
+                   V2P = array:get(V2, Vtab),
+                   case e3d_vec:line_dist_sqr(Pos, V1P, V2P) < ?EPSILON of
+                       true -> [{{V1,V2}, Edge}|Acc];
+                       false -> Acc
+                   end
+           end,
+    case wings_face:fold(Find, [], F, We) of
+        [] -> SF;
+        [{Vs,Edge}] -> SF#{op:=split_edge, o_n=>N, e=>Edge, vs=>Vs}
+    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
